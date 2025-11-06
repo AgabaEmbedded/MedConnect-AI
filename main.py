@@ -454,6 +454,7 @@ def specialist_node(state: AgentState, llm) -> AgentState:
                     {"role": "user", "content": user_message}
                 ]
                 )
+        print("model callllllll")
         AI_response = response.choices[0].message.content
         model_active = True
 
@@ -1053,5 +1054,4 @@ def handle_agent_interaction(user_input: UserMessage):
     message = last_message.content
     return AgentResponse(
         message=message
-
     )
