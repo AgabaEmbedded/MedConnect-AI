@@ -7,6 +7,7 @@ import os
 from typing import TypedDict, Annotated, Optional
 import json
 import operator
+from openai import OpenAI
 from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, END
@@ -20,24 +21,16 @@ from pydantic import BaseModel
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-print(GEMINI_API_KEY)
 
-# --- 1. FastAPI Application Initialization ---
+
+# ============================================================================
+# FASTAPI APPLICATION INITIALIZATION
+# ============================================================================
 app = FastAPI(
     title="Medical Assistant Agent API",
     description="A POST endpoint that processes a user message, pass it to the medical assistant agent and return the agent response."
 )
 
-
-class UserMessage(BaseModel):
-    """Defines the expected structure for the incoming POST request body."""
-    message: str # The message from the user
-
-
-# Model for the outgoing response
-class AgentResponse(BaseModel):
-    """Defines the structure for the response sent back to the user."""
-    message: str
 
 # ============================================================================
 # STATE DEFINITION
@@ -63,7 +56,16 @@ class AgentState(TypedDict):
     awaiting_user_input: bool  # Whether we're waiting for user response
     conversation_ended: bool  # Whether conversation is complete
 
+# Model for the user input
+class UserMessage(BaseModel):
+    """Defines the expected structure for the incoming POST request body."""
+    message: str # The message from the user
 
+
+# Model for the outgoing response
+class AgentResponse(BaseModel):
+    """Defines the structure for the response sent back to the user."""
+    message: str #model response
 # ============================================================================
 # LLM INITIALIZATION
 # ============================================================================
@@ -78,6 +80,16 @@ def initialize_llm(api_key: str):
     )
     
     return llm
+try:
+    client = OpenAI(
+        base_url="https://116xzc6wcmfgbx-8000.proxy.runpod.net/v1",
+        api_key="not-needed"  # or your actual key if you secured the pod
+    )
+    print("client initialized")
+except Exception as e:
+    print(f"Error: {e}!!!")
+
+
 
 
 # ============================================================================
@@ -98,6 +110,7 @@ def orchestrator_handoff(node_to_handoff: str, summary: str) -> dict:
     """
     print(f"\n{'-'*60}")
     print(f"Handingoff to {node_to_handoff} Agent")
+    print(f"summary of issue: {summary}")
     print(f"\n{'-'*60}")
 
     return {
@@ -121,6 +134,7 @@ def specialist_handoff(node_to_handoff: str, summary: str) -> dict:
 
     print(f"\n{'-'*60}")
     print(f"Handingoff to {node_to_handoff} Agent")
+    print(f"summary of issue: {summary}")
     print(f"\n{'-'*60}")
 
     return {
@@ -144,6 +158,7 @@ def clerking_handoff(node_to_handoff: str, summary: str) -> dict:
 
     print(f"\n{'-'*60}")
     print(f"Handingoff to {node_to_handoff} Agent")
+    print(f"summary of issue: {summary}")
     print(f"\n{'-'*60}")
 
 
@@ -159,7 +174,8 @@ def doctor_search(
     location: str = "Any",
     max_price: float = 10000.0,
     experience_level: str = "any",
-    availability: str = "any"
+    availability: str = "any",
+    gender: str = "any"
 ) -> list:
     """
     Search for doctors based on user preferences.
@@ -170,6 +186,7 @@ def doctor_search(
         max_price: Maximum consultation fee
         experience_level: "junior", "mid-level", "senior", or "any"
         availability: "immediate", "today", "this_week", or "any"
+        gender: "male", female, or any
     
     Returns:
         List of matching doctors
@@ -179,6 +196,7 @@ def doctor_search(
         {
             "id": "DOC001",
             "name": "Dr. Sarah Johnson",
+            "gender": "female",
             "specialty": "General Practitioner",
             "rating": 4.8,
             "years_experience": 12,
@@ -192,6 +210,7 @@ def doctor_search(
         {
             "id": "DOC002",
             "name": "Dr. Michael Okonkwo",
+            "gender": "male",
             "specialty": "Internal Medicine",
             "rating": 4.9,
             "years_experience": 15,
@@ -205,6 +224,7 @@ def doctor_search(
         {
             "id": "DOC003",
             "name": "Dr. Amina Bello",
+            "gender": "male",
             "specialty": "Pediatrics",
             "rating": 4.7,
             "years_experience": 8,
@@ -218,6 +238,7 @@ def doctor_search(
         {
             "id": "DOC004",
             "name": "Dr. James Adebayo",
+            "gender": "male",
             "specialty": "Cardiology",
             "rating": 4.9,
             "years_experience": 20,
@@ -231,6 +252,7 @@ def doctor_search(
         {
             "id": "DOC005",
             "name": "Dr. Fatima Mohammed",
+            "gender": "female",
             "specialty": "General Practitioner",
             "rating": 4.6,
             "years_experience": 5,
@@ -243,31 +265,57 @@ def doctor_search(
         }
     ]
     
-    # Filter by specialty
-    specialty_lower = specialty.lower()
-    filtered = [d for d in mock_doctors if specialty_lower in d["specialty"].lower()]
-    
-    # If no specialty match, return general practitioners
-    if not filtered:
-        filtered = [d for d in mock_doctors if "General" in d["specialty"]]
-    
+    found = 0
+    filtered = mock_doctors
+    # Filter by price
+    price_filtered = [d for d in filtered if d["consultation_fee"] <= max_price]
+    if price_filtered:
+        filtered = price_filtered
+        found +=1
+
     # Filter by location
     if location and location.lower() != "any":
         location_filtered = [d for d in filtered if location.lower() in d["location"].lower()]
         if location_filtered:
             filtered = location_filtered
+            found +=1
+
+    #Filter by gender
+    if gender.lower() != "any":
+        gender_filtered = [d for d in filtered if d["gender"] == gender.lower()]
+        if gender_filtered:
+            filtered = gender_filtered
+            found +=1
     
-    # Filter by price
-    filtered = [d for d in filtered if d["consultation_fee"] <= max_price]
     
     # Filter by experience level
     if experience_level.lower() != "any":
-        filtered = [d for d in filtered if d["experience_level"] == experience_level.lower()]
+        experience_filtered = [d for d in filtered if d["experience_level"] == experience_level.lower()]
+        if experience_filtered:
+            filtered = experience_filtered
+            found +=1
+
+    # Filter by specialty
+    specialty_lower = specialty.lower()
+    
+    filtered_specialty = [d for d in filtered if specialty_lower in d["specialty"].lower()] 
+    # If no specialty match, return general practitioners
+    if filtered_specialty:
+        filtered = filtered_specialty
+        found +=1
+    else:
+        filtered_specialty = [d for d in mock_doctors if "General" in d["specialty"]]
+        if filtered_specialty:
+            filtered = filtered_specialty
     
     # Sort by rating and experience
-    filtered.sort(key=lambda x: (x["rating"], x["years_experience"]), reverse=True)
+    filtered.sort(key=lambda x: (x["consultation_fee"], -x["rating"], -x["years_experience"]))
+
     
-    return filtered[:5]  # Return top 5 matches
+    if found<5:
+        return filtered[:5], "your perfect match wasn't found but these are doctors closest to your preferences\n\n"  # Return top 5 matches
+    else:
+        return filtered[:5], ""
 
 
 
@@ -376,7 +424,41 @@ def specialist_node(state: AgentState, llm) -> AgentState:
     Medical specialist - answers medical questions and queries.
     Hands off to clerking if user starts presenting complaints.
     """
-    
+
+    try:
+        
+        messages = state["messages"]
+
+        user_message = messages[-1].content
+
+        history = ""
+        
+        for message in messages[:-1]:
+            if isinstance(message, AIMessage):
+                history+=f"DOCTOR: {message.content}\n"
+            elif isinstance(message, HumanMessage):
+                history+=f"PATIENT: {message.content}\n"
+
+        system_prompt = f"""You are a medical Doctor with expert knowledge respond accurately and concise.
+
+
+        Below is the conversation history the patient have had with you thus far
+        CONVERSATION HISTORY
+        {history}"""
+
+
+        response = client.chat.completions.create(
+                model="Agaba-Embedded4/Deepfund_Medical_Assistant_Merged",
+                messages=[
+                {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+                )
+        AI_response = response.choices[0].message.content
+        model_active = True
+
+    except Exception as e:
+        model_active = False
     system_prompt = """You are an expert medical AI specialist. Your role:
 
 **RESPONSIBILITIES:**
@@ -435,10 +517,16 @@ Remember: Questions = answer, Complaints = handoff to clerking"""
         }
     
     # No handoff - continue conversation
-    return {
-        "messages": [AIMessage(content=response.content)],
+    if model_active:
+        return {
+        "messages": [AIMessage(content=AI_response)],
         "awaiting_user_input": True
     }
+    else:
+        return {
+            "messages": [AIMessage(content=response.content)],
+            "awaiting_user_input": True
+        }
 
 
 # ============================================================================
@@ -555,29 +643,53 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
     """
     
     clerking_data = state.get("clerking_convo", "")
+
+    try:
+        system_prompt = """You are a medical Doctor with expert knowledge respond accurately and Create a Medical SOAP note summary from the dialogue, following these guidelines:
+                        S (Subjective): Summarize the patient's reported symptoms, including chief complaint and relevant history. Rely on the patient's statements as the primary source and ensure standardized terminology.
+                        O (Objective): Highlight critical findings such as vital signs, lab results, and imaging, emphasizing important details like the side of the body affected and specific dosages. Include normal ranges where relevant.
+                        A (Assessment): Offer a concise assessment combining subjective and objective data. State the primary diagnosis and any differential diagnoses, noting potential complications and the prognostic outlook.
+                        P (Plan): Outline the management plan, covering medication, diet, consultations, and education. Ensure to mention necessary referrals to other specialties and address compliance challenges.
+                        Considerations: Compile the report based solely on the transcript provided. Maintain confidentiality and document sensitively. Use concise medical jargon and abbreviations for effective doctor communication.
+                        Please format the summary in a clean, simple list format without using markdown or bullet points. Use 'S:', 'O:', 'A:', 'P:' directly followed by the text. Avoid any styling or special characters."""
     
-    soap_prompt = f"""You are a medical documentation specialist. Generate a detailed professional SOAP note from this patient Doctor interaction.
 
-**CLERKING CONVERSATION:**
-{clerking_data}
+        response = client.chat.completions.create(
+                model="Agaba-Embedded4/Deepfund_Medical_Assistant_Merged",
+                messages=[
+                {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": clerking_data}
+                ]
+                )
+        soap_summary = response.choices[0].message.content
+    except Exception as e:
 
-**Generate a detailed SOAP note with these sections:**
+        soap_prompt = f"""You are a medical documentation specialist. Generate a detailed professional SOAP note from this patient Doctor interaction.
 
-**S (Subjective):** Patient's description of symptoms, concerns, history
-**O (Objective):** Any observable or measurable data mentioned (vital signs, physical findings if any)
-**A (Assessment):** Your professional assessment of the likely condition(s) - differential diagnosis
-**P (Plan):** Recommended next steps, investigations needed, referral specialty
+                        **CLERKING CONVERSATION:**
+                        {clerking_data}
 
-Be professional, concise, and clinically relevant."""
-    
-    a = """**Additional fields:**
-**Urgency Level:** low/medium/high/critical
-**Recommended Specialty:** Most appropriate medical specialty for this case"""
+                        Create a Medical SOAP note summary from the dialogue, following these guidelines:
+                        S (Subjective): Summarize the patient's reported symptoms, including chief complaint and relevant history. Rely on the patient's statements as the primary source and ensure standardized terminology.
+                        O (Objective): Highlight critical findings such as vital signs, lab results, and imaging, emphasizing important details like the side of the body affected and specific dosages. Include normal ranges where relevant.
+                        A (Assessment): Offer a concise assessment combining subjective and objective data. State the primary diagnosis and any differential diagnoses, noting potential complications and the prognostic outlook.
+                        P (Plan): Outline the management plan, covering medication, diet, consultations, and education. Ensure to mention necessary referrals to other specialties and address compliance challenges.
+                        Considerations: Compile the report based solely on the transcript provided. Maintain confidentiality and document sensitively. Use concise medical jargon and abbreviations for effective doctor communication.
+                        Please format the summary in a clean, simple list format without using markdown or bullet points. Use 'S:', 'O:', 'A:', 'P:' directly followed by the text. Avoid any styling or special characters.
+                        """
+        
 
-    response = llm.invoke([HumanMessage(content=soap_prompt)])
-    
-    soap_summary = response.content.strip()
-    
+        response = llm.invoke([HumanMessage(content=soap_prompt)])
+        
+        soap_summary = response.content.strip()
+
+    print(f"\n{'='*60}")
+    print(f"SOAP SUMMARY: \n{soap_summary}")
+    print(f"\n{'='*60}")
+
+    print(f"\n{'-'*60}")
+    print(f"Handingoff to Handoff Agent")
+    print(f"\n{'-'*60}")
     
     return {
         "soap_summary": soap_summary,
@@ -598,9 +710,9 @@ def handoff_node(state: AgentState, llm) -> AgentState:
     system_prompt = f"""You are a patient-doctor matching coordinator. Your role:
     
 **RESPONSIBILITIES:**
-1. Help patient find the right doctor for their needs
+1. Help patient find the right doctor for their needs by nicely requesting their preferences
 2. infer specialty of the required doctor from the patient-doctor conversation SOAP note
-3. Gather preferences if not already clear: specialty, location, price range, experience level
+3. Gather preferences if not already clear: [specialty, location, price range, experience level, gender]
 4. Use doctor_search tool to find matching doctors
 5. Present doctor options clearly and professionally
 
@@ -611,9 +723,7 @@ def handoff_node(state: AgentState, llm) -> AgentState:
    - Budget/price range for consultation?
    - Preference for experience level? (junior/mid-level/senior doctors)
    - Need immediate availability or flexible timing?
-3. Once you have sufficient preferences, use doctor_search tool
-4. Present the best matching doctors with their details
-5. Ask patient to select their preferred doctor
+3. Once you have sufficient preferences, use doctor_search tool which will takeover from there
 
 **DOCTOR SEARCH TOOL USAGE:**
 Call doctor_search with:
@@ -622,20 +732,8 @@ Call doctor_search with:
 - max_price: User's budget (default 10000 if not specified)
 - experience_level: User preference (default "any")
 - availability: User's urgency needs
+- gender: if user prefer male or female doctor
 
-**PRESENTING DOCTORS:**
-Show for each doctor:
-- Name and specialty
-- Rating and years of experience
-- Consultation fee
-- Location
-- Languages spoken
-- Available time slots
-- Average response time
-
-**COMPLETION:**
-When patient selects a doctor and is ready to proceed, inform them:
-"I'll now connect you with Dr. [Name]. They will receive your medical summary and reach out shortly."
 
 **IMPORTANT:**
 - Be helpful and patient
@@ -692,11 +790,11 @@ When patient selects a doctor and is ready to proceed, inform them:
         tool_call = response.tool_calls[0]
         
         # Execute doctor search
-        doctors = doctor_search.invoke(tool_call["args"])
+        doctors, return_message = doctor_search.invoke(tool_call["args"])
         
         # Format doctor results
         if doctors:
-            doctors_text = "\n\n**Available Doctors:**\n\n"
+            doctors_text = f"\n\n{return_message}**Available Doctors:**\n\n"
             for i, doc in enumerate(doctors, 1):
                 doctors_text += f"""**{i}. {doc['name']}** - {doc['specialty']}
    ⭐ Rating: {doc['rating']}/5.0 | 📅 Experience: {doc['years_experience']} years
@@ -956,203 +1054,3 @@ def handle_agent_interaction(user_input: UserMessage):
     return AgentResponse(
         message=message
     )
-
-
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-
-#if __name__ == "__main__":
-#        main()
-
-
-# ============================================================================
-# DOCUMENTATION & USAGE
-# ============================================================================
-
-"""
-═══════════════════════════════════════════════════════════════════════════
-                    MEDICAL ASSISTANT SYSTEM V2 - DOCUMENTATION
-═══════════════════════════════════════════════════════════════════════════
-
-ARCHITECTURE OVERVIEW:
-=====================
-
-The system uses 8 nodes in a directed graph:
-
-1. START → Initializes the conversation state
-2. CONTROLLER → Routes messages to the appropriate active agent
-3. ORCHESTRATOR → Receptionist for greetings and general chat
-4. SPECIALIST → Answers medical questions and provides information
-5. CLERKING → Systematically collects medical history
-6. SOAP_GENERATION → Creates structured medical summary
-7. HANDOFF → Matches patient with appropriate doctor
-8. END → Terminal node for user input or completion
-
-CONVERSATION FLOWS:
-==================
-
-Flow 1: General Greeting
-  START → CONTROLLER → ORCHESTRATOR → END (awaiting user)
-
-Flow 2: Medical Question
-  START → CONTROLLER → ORCHESTRATOR → (handoff) → CONTROLLER → SPECIALIST → END
-
-Flow 3: Medical Complaint (Full Flow)
-  START → CONTROLLER → ORCHESTRATOR → (handoff) → CONTROLLER → CLERKING
-  → (multiple turns) → CONTROLLER → SOAP_GENERATION → CONTROLLER → HANDOFF
-  → (doctor matching) → END
-
-HANDOFF MECHANISM:
-=================
-
-Each agent has a specific handoff tool:
-- orchestrator_handoff: Routes to specialist or clerking
-- specialist_handoff: Routes to clerking
-- clerking_handoff: Routes to soap_generation
-
-Handoffs include:
-- Target node name
-- Context summary for the next agent
-
-STATE VARIABLES:
-===============
-
-Key state variables:
-- messages: Full conversation history
-- active_node: Current controlling agent
-- handoff_summary: Context for handoff
-- clerking_convo: Accumulated clerking dialogue
-- soap_summary: Generated SOAP note
-- doctor_preferences: User's doctor selection criteria
-- matched_doctor: Selected doctor information
-
-INSTALLATION:
-============
-
-pip install langgraph langchain-google-genai langchain-core
-
-USAGE:
-======
-
-1. Interactive Mode (default):
-   python medical_assistant.py
-
-2. Test Mode (automated scenarios):
-   python medical_assistant.py test
-
-3. Programmatic Usage:
-   ```python
-   graph = create_medical_assistant_graph("YOUR_API_KEY")
-   state = run_conversation_turn(graph, "Hello!", None)
-   state = run_conversation_turn(graph, "I have a headache", state)
-   ```
-
-CUSTOMIZATION:
-=============
-
-1. Replace System Prompts:
-   Edit the system_prompt in each node function to customize behavior
-
-2. Modify Clerking Structure:
-   Update clerking_node system prompt with your preferred medical history format
-
-3. Add Custom Tools:
-   Define new @tool functions and bind them to appropriate nodes
-
-4. Integrate Real Database:
-   Replace doctor_search mock data with actual database queries
-
-5. Add More Nodes:
-   Create new nodes (e.g., prescription_generator, lab_recommender)
-   Add them to the graph with appropriate edges
-
-PRODUCTION DEPLOYMENT:
-=====================
-
-1. API Wrapper:
-   ```python
-   from fastapi import FastAPI, WebSocket
-   
-   app = FastAPI()
-   graph = create_medical_assistant_graph(API_KEY)
-   user_states = {}
-   
-   @app.websocket("/ws/{user_id}")
-   async def websocket_endpoint(websocket: WebSocket, user_id: str):
-       await websocket.accept()
-       state = user_states.get(user_id)
-       
-       while True:
-           data = await websocket.receive_text()
-           state = run_conversation_turn(graph, data, state)
-           user_states[user_id] = state
-           
-           response = state["messages"][-1].content
-           await websocket.send_text(response)
-   ```
-
-2. State Persistence:
-   Store conversation state in Redis/PostgreSQL between sessions
-
-3. Replace Mistral Integration:
-   In specialist_node, replace llm with your Mistral API client
-
-4. Monitoring:
-   Add logging, analytics, and error tracking at each node
-
-5. Security:
-   - Add authentication
-   - Encrypt sensitive medical data
-   - Implement rate limiting
-   - Add audit trails
-
-TESTING:
-========
-
-The system includes comprehensive test scenarios:
-- General greetings
-- Medical questions
-- Full clerking workflow
-- Doctor matching
-- Edge cases
-
-Run with: python medical_assistant.py test
-
-TROUBLESHOOTING:
-===============
-
-Common Issues:
-
-1. "Invalid tool call":
-   - Check tool parameter names match exactly
-   - Ensure tool functions return proper dictionaries
-
-2. "Node not routing correctly":
-   - Verify routing functions check the right state variables
-   - Add debug prints in routing functions
-
-3. "Conversation stuck in loop":
-   - Check awaiting_user_input flags
-   - Verify END conditions in routing logic
-
-4. "LLM not calling tools":
-   - Review system prompts for clear tool usage instructions
-   - Check llm.bind_tools() is called correctly
-
-SUPPORT & CONTRIBUTION:
-======================
-
-This is a production-ready foundation. Customize as needed for your use case.
-
-Key Extension Points:
-- Add video consultation integration
-- Implement prescription management
-- Add lab test recommendations
-- Create payment processing
-- Build doctor dashboard
-- Add multi-language support
-
-═══════════════════════════════════════════════════════════════════════════
-"""
