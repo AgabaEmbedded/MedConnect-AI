@@ -82,7 +82,7 @@ def initialize_llm(api_key: str):
     return llm
 try:
     client = OpenAI(
-        base_url="https://116xzc6wcmfgbx-8000.proxy.runpod.net/v1",
+        base_url="https://9q4mxank0nae5d-8000.proxy.runpod.net/v1",
         api_key="not-needed"  # or your actual key if you secured the pod
     )
     print("client initialized")
@@ -1053,4 +1053,5 @@ def handle_agent_interaction(user_input: UserMessage):
     message = last_message.content
     return AgentResponse(
         message=message
+
     )
