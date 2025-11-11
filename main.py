@@ -60,7 +60,7 @@ class AgentState(TypedDict):
 indicators = {"conversation_count" :0,
               "isdoctorid": False,
               "request_doctor_list": False,
-              "doctor_list": {},
+              "doctor_list": [],
               "selected_doctor" : ""
               }
 
