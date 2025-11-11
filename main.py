@@ -4,7 +4,7 @@ Enhanced architecture with clear node separation and handoff mechanisms
 """
 
 import os
-from typing import TypedDict, Annotated, Optional,  List, Dict
+from typing import TypedDict, Annotated, Optional
 import json
 import operator
 from openai import OpenAI
@@ -57,33 +57,16 @@ class AgentState(TypedDict):
     conversation_ended: bool  # Whether conversation is complete
     
 
-indicators = {"conversation_count" :0,
-              "isdoctorid": False,
-              "request_doctor_list": False,
-              "doctor_list": [],
-              "selected_doctor" : ""
-              }
-
-
-
-
- 
-
 # Model for the user input
 class UserMessage(BaseModel):
     """Defines the expected structure for the incoming POST request body."""
     message: str # The message from the user
-    isdoctorlist: bool
-    doctor_list: List[Dict]
 
 
 # Model for the outgoing response
 class AgentResponse(BaseModel):
     """Defines the structure for the response sent back to the user."""
     message: str #model response
-    doctorlist_request: bool
-    isdoctorid: bool
-    doctorid: str
 # ============================================================================
 # LLM INITIALIZATION
 # ============================================================================
@@ -182,9 +165,7 @@ def clerking_handoff(node_to_handoff: str, summary: str) -> dict:
     Returns:
         Dictionary with handoff information
     """
-    global indicators
 
-    indicators["request_doctor_list"] = True
     print(f"\n{'-'*60}")
     print(f"Handingoff to {node_to_handoff} Agent")
     print(f"summary of issue: {summary}")
@@ -197,7 +178,7 @@ def clerking_handoff(node_to_handoff: str, summary: str) -> dict:
     }
 
 
-@tool()
+@tool
 def doctor_search(
     specialty: str,
     location: str = "Any",
@@ -205,8 +186,6 @@ def doctor_search(
     experience_level: str = "any",
     availability: str = "any",
     gender: str = "any"
-    
-    
 ) -> list:
     """
     Search for doctors based on user preferences.
@@ -222,10 +201,82 @@ def doctor_search(
     Returns:
         List of matching doctors
     """
-    global indicators
+    # Mock doctor database - Replace with real database query
+    mock_doctors = [
+        {
+            "id": "DOC001",
+            "name": "Dr. Sarah Johnson",
+            "gender": "female",
+            "specialty": "General Practitioner",
+            "rating": 4.8,
+            "years_experience": 12,
+            "consultation_fee": 75,
+            "location": "Lagos, Nigeria",
+            "languages": ["English", "Yoruba"],
+            "available_slots": ["Today 2PM", "Today 5PM", "Tomorrow 9AM"],
+            "response_time_avg": "15 minutes",
+            "experience_level": "senior"
+        },
+        {
+            "id": "DOC002",
+            "name": "Dr. Michael Okonkwo",
+            "gender": "male",
+            "specialty": "Internal Medicine",
+            "rating": 4.9,
+            "years_experience": 15,
+            "consultation_fee": 100,
+            "location": "Abuja, Nigeria",
+            "languages": ["English", "Igbo"],
+            "available_slots": ["Today 3PM", "Tomorrow 10AM"],
+            "response_time_avg": "10 minutes",
+            "experience_level": "senior"
+        },
+        {
+            "id": "DOC003",
+            "name": "Dr. Amina Bello",
+            "gender": "male",
+            "specialty": "Pediatrics",
+            "rating": 4.7,
+            "years_experience": 8,
+            "consultation_fee": 80,
+            "location": "Kano, Nigeria",
+            "languages": ["English", "Hausa"],
+            "available_slots": ["Tomorrow 11AM", "Tomorrow 2PM"],
+            "response_time_avg": "20 minutes",
+            "experience_level": "mid-level"
+        },
+        {
+            "id": "DOC004",
+            "name": "Dr. James Adebayo",
+            "gender": "male",
+            "specialty": "Cardiology",
+            "rating": 4.9,
+            "years_experience": 20,
+            "consultation_fee": 150,
+            "location": "Lagos, Nigeria",
+            "languages": ["English"],
+            "available_slots": ["Today 4PM", "Tomorrow 9AM"],
+            "response_time_avg": "5 minutes",
+            "experience_level": "senior"
+        },
+        {
+            "id": "DOC005",
+            "name": "Dr. Fatima Mohammed",
+            "gender": "female",
+            "specialty": "General Practitioner",
+            "rating": 4.6,
+            "years_experience": 5,
+            "consultation_fee": 50,
+            "location": "Kano, Nigeria",
+            "languages": ["English", "Hausa", "Arabic"],
+            "available_slots": ["Today 1PM", "Today 3PM", "Tomorrow 10AM"],
+            "response_time_avg": "25 minutes",
+            "experience_level": "junior"
+        }
+    ]
     
     found = 0
-    filtered = indicators["doctor_list"]
+    filtered = mock_doctors
     # Filter by price
     price_filtered = [d for d in filtered if d["consultation_fee"] <= max_price]
     if price_filtered:
@@ -727,7 +778,7 @@ Call doctor_search with:
         
         if not selected_doctor:
             selected_doctor = search_results[0]  # Default to first
-        indicators["selected_doctor"] = selected_doctor["id"]
+        
         return {
             "messages": [AIMessage(content=f"Perfect! I'll connect you with **Dr. {selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?")],
             "matched_doctor": selected_doctor,
@@ -1008,46 +1059,20 @@ def handle_agent_interaction(user_input: UserMessage):
     2. pass it to the agent
     3. Generates and returns a agent response.
     """
-    global state, conversation_count, indicators
-    if user_input.isdoctorlist:
-        indicators["doctor_list"] = user_input.doctor_list
-    state = run_conversation_turn(graph, user_input.message)
+    global state, conversation_count
+    state = run_conversation_turn(graph, user_input.message, state)
 
     if state["messages"]:
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage):
             print(F"\n👤 YOU: {user_input.message}")
             print(f"\n🤖 ASSISTANT: {last_message.content}")
-            indicators["conversation_count"]+=1
-            print(f"\nconversation count: {indicators['conversation_count']}")
-
+            conversation_count+=1
+            print(f"\nconversation count: {conversation_count}")
     # Display state info (optional - for debugging)
     if state.get("active_node"):
         print(f"\n📊 [Active Node: {state['active_node']}]\n", end="\n")
     message = last_message.content
-    
-    if indicators["request_doctor_list"]:
-        indicators["request_doctor_list"] = False
-        return AgentResponse(
-            message=message,
-            doctorlist_request =True,
-            isdoctorid= False,
-            doctorid = ""
-        )
-    elif indicators["isdoctorid"]:
-        indicators["isdoctorid"] = False
-        return AgentResponse(
-            message=message,
-            doctorlist_request =False,
-            isdoctorid= True,
-            doctorid= indicators["selected_doctor"]
-        )
-    else:
-        return AgentResponse(
-            message=message,
-            doctorlist_request =False,
-            isdoctorid= False,
-            doctorid= ""
-        )
-
-
+    return AgentResponse(
+        message=message
+    )
