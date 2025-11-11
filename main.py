@@ -84,7 +84,7 @@ def initialize_llm(api_key: str):
 
 try:
     soap_client = OpenAI(
-        base_url="https://z8sgwy2614af6x-8000.proxy.runpod.net/v1",
+        base_url="https://60b3ldvwurvt72-8000.proxy.runpod.net/v1",
         api_key="not-needed"  # or your actual key if you secured the pod
     )
     print("client initialized")
@@ -1077,3 +1077,4 @@ def handle_agent_interaction(user_input: UserMessage):
         message=message
 
     )
+
