@@ -1042,4 +1042,12 @@ def handle_agent_interaction(user_input: UserMessage):
             isdoctorid= True,
             doctorid= indicators["selected_doctor"]
         )
+    else:
+        return AgentResponse(
+            message=message,
+            doctorlist_request =False,
+            isdoctorid= False,
+            doctorid= ""
+        )
+
 
