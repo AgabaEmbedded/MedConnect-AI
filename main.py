@@ -35,6 +35,21 @@ app = FastAPI(
 # ============================================================================
 # STATE DEFINITION
 # ============================================================================
+class DoctorInfo(TypedDict):
+
+    id: str
+    name: str
+    gender: str
+    specialty: str
+    rating: float
+    years_experience: int
+    consultation_fee: int
+    location: str
+    languages: list[str]
+    available_slots: list[str]
+    response_time_avg: str
+    experience_level: str
+
 
 class AgentState(TypedDict):
     """State shared across all nodes in the graph"""
@@ -55,18 +70,33 @@ class AgentState(TypedDict):
     # Control flags
     awaiting_user_input: bool  # Whether we're waiting for user response
     conversation_ended: bool  # Whether conversation is complete
-    
+
+
+    conversation_count :int # count of the conversation exchange for debugging
+    isdoctorid: bool    # if returning doctor id
+    request_doctor_list: bool   # to indicate if to request doctor list 
+    doctor_list: Optional[list[dict[str, any]]] # list of doctors from db Optional[List[DoctorInfo]]
+    selected_doctor : str   #selected doc id
+
+# ============================================================================
+# DEFINING API PAYLOAD
+# ============================================================================
 
 # Model for the user input
 class UserMessage(BaseModel):
     """Defines the expected structure for the incoming POST request body."""
     message: str # The message from the user
+    isdoctorlist: bool  # is the content of message doctor list
+    doctor_list: list[dict] #list of doctor from db
 
 
 # Model for the outgoing response
 class AgentResponse(BaseModel):
     """Defines the structure for the response sent back to the user."""
     message: str #model response
+    doctorlist_request: bool    #requesting doctor list
+    isdoctorid: bool    #responding doctor id
+    doctorid: str   #id of selected doctor
 # ============================================================================
 # LLM INITIALIZATION
 # ============================================================================
@@ -347,7 +377,12 @@ def controller_node(state: AgentState) -> AgentState:
             "doctor_preferences": {},
             "matched_doctor": None,
             "awaiting_user_input": True,
-            "conversation_ended": False
+            "conversation_ended": False,
+            "conversation_count" :0,
+            "isdoctorid": False,
+            "request_doctor_list": False,
+            "doctor_list": [],
+            "selected_doctor" : ""
         }
     
     active = state.get("active_node", "orchestrator")
@@ -716,7 +751,8 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
     return {
         "soap_summary": soap_summary,
         "active_node": "handoff",
-        "awaiting_user_input": False
+        "awaiting_user_input": False,
+        "request_doctor_list": True,
     }
 
 
@@ -1005,7 +1041,12 @@ def run_conversation_turn(graph, user_input: str, state: AgentState = None) -> A
             "doctor_preferences": {},
             "matched_doctor": None,
             "awaiting_user_input": False,
-            "conversation_ended": False
+            "conversation_ended": False,
+            "conversation_count" :0,
+            "isdoctorid": False,
+            "request_doctor_list": False,
+            "doctor_list": [],
+            "selected_doctor" : ""
         }
     
     # Add user message to state
@@ -1059,7 +1100,7 @@ def handle_agent_interaction(user_input: UserMessage):
     2. pass it to the agent
     3. Generates and returns a agent response.
     """
-    global state, conversation_count
+
     state = run_conversation_turn(graph, user_input.message, state)
 
     if state["messages"]:
