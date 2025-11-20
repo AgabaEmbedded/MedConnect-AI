@@ -35,6 +35,21 @@ app = FastAPI(
 # ============================================================================
 # STATE DEFINITION
 # ============================================================================
+class DoctorInfo(TypedDict):
+
+    id: str
+    name: str
+    gender: str
+    specialty: str
+    rating: float
+    years_experience: int
+    consultation_fee: int
+    location: str
+    languages: list[str]
+    available_slots: list[str]
+    response_time_avg: str
+    experience_level: str
+
 
 class AgentState(TypedDict):
     """State shared across all nodes in the graph"""
@@ -55,18 +70,32 @@ class AgentState(TypedDict):
     # Control flags
     awaiting_user_input: bool  # Whether we're waiting for user response
     conversation_ended: bool  # Whether conversation is complete
-    
+
+
+    isdoctorid: bool    # if returning doctor id
+    request_doctor_list: bool   # to indicate if to request doctor list 
+    doctor_list: Optional[list[dict[str, any]]] # list of doctors from db Optional[List[DoctorInfo]]
+    selected_doctor : str   #selected doc id
+
+# ============================================================================
+# DEFINING API PAYLOAD
+# ============================================================================
 
 # Model for the user input
 class UserMessage(BaseModel):
     """Defines the expected structure for the incoming POST request body."""
     message: str # The message from the user
+    isdoctorlist: bool  # is the content of message doctor list
+    doctor_list: list[dict] #list of doctor from db
 
 
 # Model for the outgoing response
 class AgentResponse(BaseModel):
     """Defines the structure for the response sent back to the user."""
     message: str #model response
+    doctorlist_request: bool    #requesting doctor list
+    isdoctorid: bool    #responding doctor id
+    doctorid: str   #id of selected doctor
 # ============================================================================
 # LLM INITIALIZATION
 # ============================================================================
@@ -201,79 +230,10 @@ def doctor_search(
     Returns:
         List of matching doctors
     """
+
+    global state
     # Mock doctor database - Replace with real database query
-    mock_doctors = [
-        {
-            "id": "DOC001",
-            "name": "Dr. Sarah Johnson",
-            "gender": "female",
-            "specialty": "General Practitioner",
-            "rating": 4.8,
-            "years_experience": 12,
-            "consultation_fee": 75,
-            "location": "Lagos, Nigeria",
-            "languages": ["English", "Yoruba"],
-            "available_slots": ["Today 2PM", "Today 5PM", "Tomorrow 9AM"],
-            "response_time_avg": "15 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC002",
-            "name": "Dr. Michael Okonkwo",
-            "gender": "male",
-            "specialty": "Internal Medicine",
-            "rating": 4.9,
-            "years_experience": 15,
-            "consultation_fee": 100,
-            "location": "Abuja, Nigeria",
-            "languages": ["English", "Igbo"],
-            "available_slots": ["Today 3PM", "Tomorrow 10AM"],
-            "response_time_avg": "10 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC003",
-            "name": "Dr. Amina Bello",
-            "gender": "male",
-            "specialty": "Pediatrics",
-            "rating": 4.7,
-            "years_experience": 8,
-            "consultation_fee": 80,
-            "location": "Kano, Nigeria",
-            "languages": ["English", "Hausa"],
-            "available_slots": ["Tomorrow 11AM", "Tomorrow 2PM"],
-            "response_time_avg": "20 minutes",
-            "experience_level": "mid-level"
-        },
-        {
-            "id": "DOC004",
-            "name": "Dr. James Adebayo",
-            "gender": "male",
-            "specialty": "Cardiology",
-            "rating": 4.9,
-            "years_experience": 20,
-            "consultation_fee": 150,
-            "location": "Lagos, Nigeria",
-            "languages": ["English"],
-            "available_slots": ["Today 4PM", "Tomorrow 9AM"],
-            "response_time_avg": "5 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC005",
-            "name": "Dr. Fatima Mohammed",
-            "gender": "female",
-            "specialty": "General Practitioner",
-            "rating": 4.6,
-            "years_experience": 5,
-            "consultation_fee": 50,
-            "location": "Kano, Nigeria",
-            "languages": ["English", "Hausa", "Arabic"],
-            "available_slots": ["Today 1PM", "Today 3PM", "Tomorrow 10AM"],
-            "response_time_avg": "25 minutes",
-            "experience_level": "junior"
-        }
-    ]
+    mock_doctors = state["doctor_list"]
     
     found = 0
     filtered = mock_doctors
@@ -338,6 +298,8 @@ def controller_node(state: AgentState) -> AgentState:
     Routes user input to the appropriate active node.
     Pure routing logic - no AI, no tools.
     """
+
+
     if not state.get("active_node"):
         return {
             "active_node": "orchestrator",  # Start with orchestrator
@@ -347,10 +309,15 @@ def controller_node(state: AgentState) -> AgentState:
             "doctor_preferences": {},
             "matched_doctor": None,
             "awaiting_user_input": True,
-            "conversation_ended": False
+            "conversation_ended": False,
+            "isdoctorid": False,
+            "request_doctor_list": False,
+            "doctor_list": [],
+            "selected_doctor" : ""
+
         }
     
-    active = state.get("active_node", "orchestrator")
+    #active = state.get("active_node", "orchestrator")
     
     # Simply pass through - routing handled by conditional edges
     return {
@@ -550,56 +517,42 @@ def clerking_node(state: AgentState, llm) -> AgentState:
     Accumulates all conversation in clerking_convo state.
     """
     
-    system_prompt = """You are a remote medical assistant designed to assist doctors in conducting thorough patient clerking and history taking. Your primary role is to guide the history-taking process in a structured, empathetic, and professional manner. Interact conversationally with the patient, building on the chief complaint which was provided or start (if no chief complaint was provided) with an open-ended questions and progressing to focused ones. Always prioritize being thorough. Do not provide diagnoses, treatment plans, or medical advice yourself.
+    system_prompt = """You are a thorough medical history collection specialist (clerking agent). Your role:
+
 **RESPONSIBILITIES:**
 1. Systematically collect comprehensive medical history
-2. Ask relevant follow-up questions, ask 1 or 2 question per response not to overwhelm the patient
+2. Ask relevant follow-up questions
 3. Cover all important aspects of the patient's complaint
-4. Know when you have sufficient information and handoff to the soap_generation agent using the handoff_tool
+4. Know when you have sufficient information
 
-Follow this structured framework for every interaction, based on standard medical history-taking principles:
+**CLERKING STRUCTURE (Follow this flow):**
+1. **Chief Complaint**: What's the main problem? (already provided usually)
+2. **History of Present Illness**:
+   - When did it start?
+   - How did it develop/progress?
+   - Severity (scale 1-10)?
+   - Character/quality of symptoms?
+   - What makes it better/worse?
+   - Associated symptoms?
+3. **Past Medical History**:
+   - Any chronic conditions? (diabetes, hypertension, asthma, etc.)
+   - Previous hospitalizations or surgeries?
+4. **Medications & Allergies**:
+   - Current medications, supplements?
+   - Any drug allergies?
+5. **Social History** (brief):
+   - Smoking/alcohol use?
+   - Occupation?
+   - Recent travel?
+6. **Review of Systems** (if relevant):
+   - Any other symptoms anywhere?
 
-1. **Introduction and Confirmation**:
-   - Introduce yourself: "I am a remote medical assistant assigned with your history taking."
-   - Reiterate the chief complaint if already available and ensure the patient is comfortable and happy to proceed.
-
-2. **Demographics**:
-   - Gather basic details: age, sex/gender, occupation, and any relevant context (e.g., living situation if it impacts health).
-
-3. **Presenting Complaint (PC)**:
-   - Start with an open-ended question like asking the patient to expatiate on the chief complaint or "What brings you in today?" or "What would you like to discuss?" if no chief complaint yet
-   - Allow the patient to speak uninterrupted, if the patient has an unfinished statement gently nudge them to complete it.
-   - Summarize what they've said for confirmation.
-
-4. **History of Presenting Complaint (HPC)**:
-   - Use the DOPPS mnemonic as a guide: Duration (how long?), Onset (how did it start? Any triggers?), Progression (getting better/worse? Aggravating/relieving factors?), Severity (impact on daily life? Scale of 1-10 if applicable), Symptoms (associated symptoms?).
-   - For pain-specific complaints, incorporate SOCRATES: Site, Onset, Character, Radiation, Associations, Time course, Exacerbating/relieving factors, Severity.
-   - Explore why they're seeking help now (e.g., if chronic, what changed?).
-   - Ask about previous episodes and outcomes.
-   - Perform a targeted review of systems (ROS) for related symptoms: e.g., cardiovascular (chest pain, shortness of breath, palpitations), gastrointestinal (nausea, vomiting, bowel changes), urinary, systemic (fever, weight loss, night sweats), or specialty-specific (e.g., headache with fever, photophobia for neurological).
-   - Incorporate ICE: Ideas (what do you think is causing this?), Concerns (any worries, like fear of cancer?), Expectations (what are you hoping we can do?).
-
-5. **Past Medical History (PMH)**:
-   - Ask about chronic conditions, surgeries, hospitalizations, or significant illnesses.
-   - Cross-reference with any provided records (if available via doctor).
-
-6. **Medications and Allergies**:
-   - List current medications, doses, recent changes, and compliance.
-   - Inquire about over-the-counter drugs, supplements.
-   - Ask about allergies or adverse reactions (e.g., what happens?).
-
-7. **Social History**:
-   - Explore occupation and functional level (e.g., daily activities, mobility).
-   - Ask about living situation, caregivers, support system.
-   - Screen for smoking (pack-years), alcohol (units/week), illicit substances.
-   - If relevant: travel history, sexual history (with sensitivity and consent).
-
-8. **Family History**:
-   - Focus on hereditary conditions: relations affected, age of onset (e.g., cardiac events under 50, cancers).
-
-9. **Physical Examination and Investigations** (Assistive Only):
-   - Prompt the doctor for any physical exam findings (e.g., vital signs like blood pressure, including lying/standing if relevant).
-   - Note any available investigations (e.g., blood results, ECG, imaging) provided by the doctor.
+**CONVERSATION STYLE:**
+- Ask 1-2 questions at a time (don't overwhelm)
+- Be empathetic and reassuring
+- Acknowledge their concerns
+- Use simple language
+- Build rapport
 
 **COMPLETION CRITERIA:**
 When you have covered the main points above and feel you have a clear picture of:
@@ -610,8 +563,11 @@ When you have covered the main points above and feel you have a clear picture of
 
 Then use clerking_handoff to move to "soap_generation" with summary: "Clerking completed, ready for SOAP note generation"
 
-Be adaptive and thorough: Tailor questions based on the patient's responses, context (e.g., acute vs. chronic, specialty like general practice vs. emergency) and use simple language, avoid jargon, and explain terms if needed. Maintain empathy: Acknowledge concerns.
-"""
+**IMPORTANT:**
+- Don't rush - be thorough but efficient
+- Don't provide medical advice or diagnosis during clerking
+- Focus on GATHERING information, not giving it
+- Every question should have a purpose"""
 
     # Build message history
     messages = [SystemMessage(content=system_prompt)]
@@ -716,7 +672,8 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
     return {
         "soap_summary": soap_summary,
         "active_node": "handoff",
-        "awaiting_user_input": False
+        "awaiting_user_input": False,
+        "request_doctor_list": True,
     }
 
 
@@ -780,8 +737,9 @@ Call doctor_search with:
             selected_doctor = search_results[0]  # Default to first
         
         return {
-            "messages": [AIMessage(content=f"Perfect! I'll connect you with **Dr. {selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?")],
+            "messages": [AIMessage(content=f"Perfect! I'll connect you with **{selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?")],
             "matched_doctor": selected_doctor,
+            "isdoctorid": True,
             "awaiting_user_input": False,
             "conversation_ended": True
         }
@@ -829,7 +787,7 @@ Call doctor_search with:
             
             doctors_text += "\nWhich doctor would you prefer? Please let me know by number or name."
             
-            # Store doctors in state for selection
+            # Store doctors in state for selectionn
             return {
                 "messages": [AIMessage(content=response.content + "\n\n" + doctors_text)],
                 "doctor_preferences": {
@@ -989,7 +947,7 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
 # CONVERSATION RUNNER
 # ============================================================================
 
-def run_conversation_turn(graph, user_input: str, state: AgentState = None) -> AgentState:
+def run_conversation_turn(graph, user_input: dict, state: AgentState = None) -> AgentState:
     """
     Process a single user message through the graph.
     """
@@ -1005,11 +963,18 @@ def run_conversation_turn(graph, user_input: str, state: AgentState = None) -> A
             "doctor_preferences": {},
             "matched_doctor": None,
             "awaiting_user_input": False,
-            "conversation_ended": False
+            "conversation_ended": False,
+            "isdoctorid": False,
+            "request_doctor_list": False,
+            "doctor_list": [],
+            "selected_doctor" : ""
         }
     
     # Add user message to state
-    state["messages"].append(HumanMessage(content=user_input))
+    state["messages"].append(HumanMessage(content=user_input.message))
+    if user_input.isdoctorlist:
+        state["doctor_list"] = user_input.doctor_list
+    
     
     # Run the graph
     result = graph.invoke(state)
@@ -1060,7 +1025,8 @@ def handle_agent_interaction(user_input: UserMessage):
     3. Generates and returns a agent response.
     """
     global state, conversation_count
-    state = run_conversation_turn(graph, user_input.message, state)
+
+    state = run_conversation_turn(graph, user_input, state)
 
     if state["messages"]:
         last_message = state["messages"][-1]
@@ -1073,6 +1039,27 @@ def handle_agent_interaction(user_input: UserMessage):
     if state.get("active_node"):
         print(f"\n📊 [Active Node: {state['active_node']}]\n", end="\n")
     message = last_message.content
-    return AgentResponse(
-        message=message
-    )
+    
+    if state["request_doctor_list"]:
+        state["request_doctor_list"] = False
+        return AgentResponse(
+            message=message,
+            doctorlist_request =True,
+            isdoctorid= False,
+            doctorid = ""
+        )
+    elif state["isdoctorid"]:
+        state["isdoctorid"] = False
+        return AgentResponse(
+            message=message,
+            doctorlist_request =False,
+            isdoctorid= True,
+            doctorid= state["selected_doctor"]
+        )
+    else:
+        return AgentResponse(
+            message=message,
+            doctorlist_request =False,
+            isdoctorid= False,
+            doctorid= ""
+        )
