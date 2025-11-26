@@ -14,6 +14,7 @@ from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
+from google.cloud import translate_v2 as translate
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -76,6 +77,7 @@ class AgentState(TypedDict):
     request_doctor_list: bool   # to indicate if to request doctor list 
     doctor_list: Optional[list[dict[str, any]]] # list of doctors from db Optional[List[DoctorInfo]]
     selected_doctor : str   #selected doc id
+    language: str   #language the user is communicating in
 
 # ============================================================================
 # DEFINING API PAYLOAD
@@ -87,6 +89,7 @@ class UserMessage(BaseModel):
     message: str # The message from the user
     isdoctorlist: bool  # is the content of message doctor list
     doctor_list: list[dict] #list of doctor from db
+    language: str
 
 
 # Model for the outgoing response
@@ -112,22 +115,19 @@ def initialize_llm(api_key: str):
     return llm
 
 try:
-    soap_client = OpenAI(
+    client = OpenAI(
         base_url="https://z8sgwy2614af6x-8000.proxy.runpod.net/v1",
         api_key="not-needed"  # or your actual key if you secured the pod
     )
     print("client initialized")
 except Exception as e:
-    print(f"Error: {e}!!!")
+    print(f"Error initializing medconnectai: {e}!!!")
 
 try:
-    specialist_client = OpenAI(
-        base_url="https://qrtndbe79de4uz-8000.proxy.runpod.net/v1",
-        api_key="not-needed"  # or your actual key if you secured the pod
-    )
-    print("client initialized")
+    translate_client = translate.Client()
 except Exception as e:
-    print(f"Error: {e}!!!")
+    print(f"error initializing translate client: {e}")
+
 
 
 
@@ -407,7 +407,7 @@ def specialist_node(state: AgentState, llm) -> AgentState:
         messages = state["messages"]
 
         user_message = messages[-1].content
-
+        language = state["language"]
         history = ""
         
         for message in messages[:-1]:
@@ -415,6 +415,13 @@ def specialist_node(state: AgentState, llm) -> AgentState:
                 history+=f"DOCTOR: {message.content}\n"
             elif isinstance(message, HumanMessage):
                 history+=f"PATIENT: {message.content}\n"
+
+
+        if language != "english":
+            history = translate_client.translate(
+            history, 
+            target_language="en"
+            )
 
         system_prompt = f"""You are a medical Doctor with expert knowledge respond accurately and concise.
 
@@ -424,20 +431,29 @@ def specialist_node(state: AgentState, llm) -> AgentState:
         {history}"""
 
 
-        response = specialist_client.chat.completions.create(
-                model="microsoft/MediPhi-Instruct",
+        response = client.chat.completions.create(
+                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
                 messages=[
                 {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
                 ],
                 #max_tokens = 400
                 )
-        AI_response = response.choices[0].message.content
+        
+
+        if language != "english":
+            AI_response = translate_client.translate(
+            response.choices[0].message.content, 
+            target_language=state["language"][:2]
+            )
+        else:
+            AI_response = response.choices[0].message.content
+
         model_active = True
 
     except Exception as e:
         model_active = False
-    system_prompt = """You are an expert medical AI specialist. Your role:
+    system_prompt = f"""You are an expert medical AI specialist. Your role:
 
 **RESPONSIBILITIES:**
 1. Answer medical questions with accurate, evidence-based information
@@ -457,6 +473,7 @@ def specialist_node(state: AgentState, llm) -> AgentState:
   * Conversation shifts from general info to personal health issues
 
 **RESPONSE GUIDELINES:**
+- Communicate in {language} language
 - Be thorough but concise
 - Use simple language, avoid excessive medical jargon
 - Always include disclaimers: "This is general information, not personal medical advice"
@@ -516,8 +533,8 @@ def clerking_node(state: AgentState, llm) -> AgentState:
     Medical history collector - systematically clerks patient.
     Accumulates all conversation in clerking_convo state.
     """
-    
-    system_prompt = """You are a thorough medical history collection specialist (clerking agent). Your role:
+    language = state["language"]
+    system_prompt = f"""You are a thorough medical history collection specialist (clerking agent), Communicate in {language} language. Your role:
 
 **RESPONSIBILITIES:**
 1. Systematically collect comprehensive medical history
@@ -621,8 +638,17 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
     """
     
     clerking_data = state.get("clerking_convo", "")
+    language = state["language"]
+
+    if language != "english":
+        clerking_data = translate_client.translate(
+            clerking_data, 
+            target_language="en"
+            )
+
 
     try:
+        
         system_prompt = """You are a medical Doctor with expert knowledge respond accurately and Create a Medical SOAP note summary from the dialogue, following these guidelines:
                         S (Subjective): Summarize the patient's reported symptoms, including chief complaint and relevant history. Rely on the patient's statements as the primary source and ensure standardized terminology.
                         O (Objective): Highlight critical findings such as vital signs, lab results, and imaging, emphasizing important details like the side of the body affected and specific dosages. Include normal ranges where relevant.
@@ -632,8 +658,8 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
                         Please format the summary in a clean, simple list format without using markdown or bullet points. Use 'S:', 'O:', 'A:', 'P:' directly followed by the text. Avoid any styling or special characters."""
     
 
-        response = soap_client.chat.completions.create(
-                model="Agaba-Embedded4/Deepfund_Medical_Assistant_Merged",
+        response = client.chat.completions.create(
+                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
                 messages=[
                 {"role": "system", "content": system_prompt},
                     {"role": "user", "content": clerking_data}
@@ -686,7 +712,8 @@ def handoff_node(state: AgentState, llm) -> AgentState:
     Doctor matching and handoff agent.
     Gathers user preferences and finds appropriate doctor.
     """
-    system_prompt = f"""You are a patient-doctor matching coordinator. Your role:
+    language = state["language"]
+    system_prompt = f"""You are a patient-doctor matching coordinator, communicate in {language} language. Your role:
     
 **RESPONSIBILITIES:**
 1. Help patient find the right doctor for their needs by nicely requesting their preferences
@@ -722,6 +749,12 @@ Call doctor_search with:
 - Be transparent about doctor qualifications"""
     # Check if user selected a doctor (simple heuristic)
     last_msg = state["messages"][-1].content.lower()
+
+    if language != "english":
+        last_msg = translate_client.translate(
+            last_msg, 
+            target_language="en"
+            )
     search_results = state.get("doctor_preferences", {}).get("search_results", [])
     
     if search_results and any(word in last_msg for word in ["select", "choose", "pick", "first", "second", "third", "1", "2", "3", "dr.", "doctor"]):
@@ -736,8 +769,16 @@ Call doctor_search with:
         if not selected_doctor:
             selected_doctor = search_results[0]  # Default to first
         
+        return_message = f"Perfect! I'll connect you with **{selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?"
+
+        if language != "english":
+            return_message = translate_client.translate(
+                return_message, 
+                target_language=language[:2]
+                )
+            
         return {
-            "messages": [AIMessage(content=f"Perfect! I'll connect you with **{selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?")],
+            "messages": [AIMessage(content=return_message)],
             "matched_doctor": selected_doctor,
             "isdoctorid": True,
             "awaiting_user_input": False,
@@ -787,9 +828,16 @@ Call doctor_search with:
             
             doctors_text += "\nWhich doctor would you prefer? Please let me know by number or name."
             
+            doctor_text = response.content + "\n\n" + doctors_text
+
+            if language != "english":
+                doctor_text = translate_client.translate(
+                    doctor_text, 
+                    target_language=language[:2]
+                    )
             # Store doctors in state for selectionn
             return {
-                "messages": [AIMessage(content=response.content + "\n\n" + doctors_text)],
+                "messages": [AIMessage(content=doctor_text)],
                 "doctor_preferences": {
                     **state.get("doctor_preferences", {}),
                     "search_results": doctors
@@ -797,8 +845,14 @@ Call doctor_search with:
                 "awaiting_user_input": True
             }
         else:
+            notfound_text = "I couldn't find any doctors matching those specific criteria. Could you adjust your preferences? For example, a different location or higher budget?"
+            if language != "english":
+                notfound_text = translate_client.translate(
+                    notfound_text, 
+                    target_language=language[:2]
+                    )
             return {
-                "messages": [AIMessage(content="I couldn't find any doctors matching those specific criteria. Could you adjust your preferences? For example, a different location or higher budget?")],
+                "messages": [AIMessage(content=notfound_text)],
                 "awaiting_user_input": True
             }
     
@@ -974,6 +1028,7 @@ def run_conversation_turn(graph, user_input: dict, state: AgentState = None) -> 
     state["messages"].append(HumanMessage(content=user_input.message))
     if user_input.isdoctorlist:
         state["doctor_list"] = user_input.doctor_list
+    state.language = user_input.language
     
     
     # Run the graph
