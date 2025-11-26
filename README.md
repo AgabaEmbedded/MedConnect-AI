@@ -13,4 +13,5 @@ This agent is built using langraph and uses our finetuned mistral-7B `Agaba-Embe
 
 ---
 ## System Achitecture
-![Local Image]("MedConnect Agent Architecture.png" "Multi-Agent AI System Architecture")
+![Multi-Agent AI System Architecture](MedConnect%20Agent%20Architecture.png)
+
