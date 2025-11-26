@@ -14,7 +14,7 @@ from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
-from google.cloud import translate_v2 as translate
+from google.cloud import translate
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+parent = f"projects/medconnect-479308/locations/global"
 
 
 # ============================================================================
@@ -124,7 +125,7 @@ except Exception as e:
     print(f"Error initializing medconnectai: {e}!!!")
 
 try:
-    translate_client = translate.Client()
+    translate_client = translate.TranslationServiceClient()
 except Exception as e:
     print(f"error initializing translate client: {e}")
 
@@ -234,7 +235,6 @@ def doctor_search(
     global state
     # Mock doctor database - Replace with real database query
     mock_doctors = state["doctor_list"]
-    
     found = 0
     filtered = mock_doctors
     # Filter by price
@@ -334,8 +334,8 @@ def orchestrator_node(state: AgentState, llm) -> AgentState:
     Receptionist agent - handles greetings and non-medical conversations.
     Hands off to specialist (medical queries) or clerking (medical complaints).
     """
-    
-    system_prompt = """You are a friendly and professional medical receptionist assistant. Your role:
+    language = state["language"]
+    system_prompt = f"""You are a friendly and professional medical receptionist assistant, Communicate in {language} language. Your role:
 
 **RESPONSIBILITIES:**
 1. Greet users warmly and make them feel comfortable
@@ -375,8 +375,9 @@ Remember: Medical questions = specialist, Medical complaints = clerking"""
     
     # Check if tool was called
     if response.tool_calls:
-        tool_call = response.tool_calls[0]
         
+        tool_call = response.tool_calls[0]
+
         # Execute the handoff
         handoff_result = orchestrator_handoff.invoke(tool_call["args"])
         
@@ -418,10 +419,18 @@ def specialist_node(state: AgentState, llm) -> AgentState:
 
 
         if language != "english":
-            history = translate_client.translate(
-            history, 
-            target_language="en"
-            )
+
+            history = translate_client.translate_text(
+            parent=parent,
+            contents=[history],
+            source_language_code = language[:2],
+            target_language_code= "en",
+            mime_type="text/plain", 
+            ).translations[0].translated_text
+
+        print(f"\n{'#'*60}")
+        print(f"SPECIALIST HISTORY: {history}")
+        print(f"\n{'#'*60}")
 
         system_prompt = f"""You are a medical Doctor with expert knowledge respond accurately and concise.
 
@@ -442,18 +451,24 @@ def specialist_node(state: AgentState, llm) -> AgentState:
         
 
         if language != "english":
-            AI_response = translate_client.translate(
-            response.choices[0].message.content, 
-            target_language=state["language"][:2]
-            )
+        
+            AI_response = translate_client.translate_text(
+            parent=parent,
+            contents=[response.choices[0].message.content],
+            source_language_code = "en",
+            target_language_code= language[:2],
+            mime_type="text/plain", 
+            ).translations[0].translated_text
+            
         else:
             AI_response = response.choices[0].message.content
 
         model_active = True
 
     except Exception as e:
+        print(f"Unable to access model: {e}")
         model_active = False
-    system_prompt = f"""You are an expert medical AI specialist. Your role:
+    system_prompt = f"""You are an expert medical AI specialist, Communicate in {language} language. Your role:
 
 **RESPONSIBILITIES:**
 1. Answer medical questions with accurate, evidence-based information
@@ -473,7 +488,6 @@ def specialist_node(state: AgentState, llm) -> AgentState:
   * Conversation shifts from general info to personal health issues
 
 **RESPONSE GUIDELINES:**
-- Communicate in {language} language
 - Be thorough but concise
 - Use simple language, avoid excessive medical jargon
 - Always include disclaimers: "This is general information, not personal medical advice"
@@ -641,12 +655,17 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
     language = state["language"]
 
     if language != "english":
-        clerking_data = translate_client.translate(
-            clerking_data, 
-            target_language="en"
-            )
-
-
+        clerking_data = translate_client.translate_text(
+            parent=parent,
+            contents=[clerking_data],
+            source_language_code = language[:2],
+            target_language_code= "en",
+            mime_type="text/plain", 
+            ).translations[0].translated_text
+        
+    print(f"\n{'#'*60}")
+    print(f"CLERKING DATA: {clerking_data}")
+    print(f"\n{'#'*60}")
     try:
         
         system_prompt = """You are a medical Doctor with expert knowledge respond accurately and Create a Medical SOAP note summary from the dialogue, following these guidelines:
@@ -667,7 +686,7 @@ def soap_generation_node(state: AgentState, llm) -> AgentState:
                 )
         soap_summary = response.choices[0].message.content
     except Exception as e:
-
+        print(f"Unable to access model: {e}")
         soap_prompt = f"""You are a medical documentation specialist. Generate a detailed professional SOAP note from this patient Doctor interaction.
 
                         **CLERKING CONVERSATION:**
@@ -751,10 +770,15 @@ Call doctor_search with:
     last_msg = state["messages"][-1].content.lower()
 
     if language != "english":
-        last_msg = translate_client.translate(
-            last_msg, 
-            target_language="en"
-            )
+        last_msg = translate_client.translate_text(
+            parent=parent,
+            contents=[last_msg],
+            source_language_code = language[:2],
+            target_language_code= "en",
+            mime_type="text/plain", 
+            ).translations[0].translated_text
+        
+        
     search_results = state.get("doctor_preferences", {}).get("search_results", [])
     
     if search_results and any(word in last_msg for word in ["select", "choose", "pick", "first", "second", "third", "1", "2", "3", "dr.", "doctor"]):
@@ -772,10 +796,14 @@ Call doctor_search with:
         return_message = f"Perfect! I'll connect you with **{selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?"
 
         if language != "english":
-            return_message = translate_client.translate(
-                return_message, 
-                target_language=language[:2]
-                )
+            return_message = translate_client.translate_text(
+            parent=parent,
+            contents=[return_message],
+            source_language_code = "en",
+            target_language_code= language[:2],
+            mime_type="text/plain", 
+            ).translations[0].translated_text
+            
             
         return {
             "messages": [AIMessage(content=return_message)],
@@ -807,6 +835,8 @@ Call doctor_search with:
     
     # Check if tool was called
     if response.tool_calls:
+
+        
      
         tool_call = response.tool_calls[0]
         
@@ -831,10 +861,15 @@ Call doctor_search with:
             doctor_text = response.content + "\n\n" + doctors_text
 
             if language != "english":
-                doctor_text = translate_client.translate(
-                    doctor_text, 
-                    target_language=language[:2]
-                    )
+                doctor_text = translate_client.translate_text(
+                parent=parent,
+                contents=[doctor_text],
+                source_language_code = "en",
+                target_language_code= language[:2],
+                mime_type="text/plain", 
+                ).translations[0].translated_text
+                
+            
             # Store doctors in state for selectionn
             return {
                 "messages": [AIMessage(content=doctor_text)],
@@ -847,10 +882,14 @@ Call doctor_search with:
         else:
             notfound_text = "I couldn't find any doctors matching those specific criteria. Could you adjust your preferences? For example, a different location or higher budget?"
             if language != "english":
-                notfound_text = translate_client.translate(
-                    notfound_text, 
-                    target_language=language[:2]
-                    )
+                notfound_text = translate_client.translate_text(
+                parent=parent,
+                contents=[notfound_text],
+                source_language_code = "en",
+                target_language_code= language[:2],
+                mime_type="text/plain", 
+                ).translations[0].translated_text
+                
             return {
                 "messages": [AIMessage(content=notfound_text)],
                 "awaiting_user_input": True
@@ -1021,14 +1060,15 @@ def run_conversation_turn(graph, user_input: dict, state: AgentState = None) -> 
             "isdoctorid": False,
             "request_doctor_list": False,
             "doctor_list": [],
-            "selected_doctor" : ""
+            "selected_doctor" : "",
+            "language": "english"
         }
     
     # Add user message to state
     state["messages"].append(HumanMessage(content=user_input.message))
     if user_input.isdoctorlist:
         state["doctor_list"] = user_input.doctor_list
-    state.language = user_input.language
+    state["language"] = user_input.language.lower()
     
     
     # Run the graph
@@ -1092,7 +1132,7 @@ def handle_agent_interaction(user_input: UserMessage):
             print(f"\nconversation count: {conversation_count}")
     # Display state info (optional - for debugging)
     if state.get("active_node"):
-        print(f"\n📊 [Active Node: {state['active_node']}]\n", end="\n")
+        print(f"\n📊 [Active Node: {state['active_node']}, language: {state['language']}]\n", end="\n")
     message = last_message.content
     
     if state["request_doctor_list"]:
