@@ -1,6 +1,7 @@
 # MedConnect-AI
 
 ## Multi-Agent AI system for Our medical Freelance platform
+
 This agent is built using langraph and uses our finetuned mistral-7B `Agaba-Embedded4/MedConnectAI-FineTunned-4bit` instruct and gemini
 ---
 
