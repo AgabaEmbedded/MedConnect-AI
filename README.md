@@ -39,5 +39,7 @@ uvicorn main:app --reload
 ![Multi-Agent AI System Architecture](MedConnect%20Agent%20Architecture.png)
 
 ## Evaluation Result
-![Our Model Evaluation Results](benchmark.png)
+![Evaluation (LLM-AS-A-JUDGE)](llm-as-a-judge.png)
+
+![Evaluation (ROUGE-SCORE)](Rouge-score.png)
 
