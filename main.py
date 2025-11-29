@@ -189,6 +189,22 @@ class ClientManager:
         except Exception as e:
             logger.error(f"Medical LLM call failed: {e}")
             return None
+    def extract_text(self, content):
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Gemini list of parts
+            return "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        if isinstance(content, dict):
+            # Gemini { "parts": [...] }
+            parts = content.get("parts", [])
+            return "".join(
+                part.get("text", "") for part in parts if isinstance(part, dict)
+            )
+        return str(content)
+
 
 # Global client manager
 client_manager = ClientManager()
@@ -339,18 +355,6 @@ def controller_node(state: AgentState) -> AgentState:
         logger.info("Initializing new conversation")
         return {
             "active_node": NodeType.ORCHESTRATOR.value,
-            "handoff_summary": None,
-            "clerking_convo": "",
-            "soap_summary": None,
-            "doctor_preferences": {},
-            "matched_doctor": None,
-            "awaiting_user_input": True,
-            "conversation_ended": False,
-            "is_doctor_id": False,
-            "request_doctor_list": False,
-            "doctor_list": [],
-            "selected_doctor": "",
-            "language": "english"
         }
     
     return {"awaiting_user_input": False}
@@ -362,6 +366,7 @@ def orchestrator_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentSt
     language = state.get("language", "english")
     
     system_prompt = f"""You are a professional medical receptionist assistant communicating in {language}.
+    you work for MedConnect a company that connects patients to doctor (like a medical freelance platform).
 
 CORE RESPONSIBILITIES:
 • Warmly greet patients and make them feel comfortable
@@ -390,7 +395,7 @@ IMPORTANT GUIDELINES:
 • Keep responses conversational and concise
 
 Remember: Questions about medical topics = specialist | Personal health complaints = clerking"""
-
+    
     messages = [SystemMessage(content=system_prompt)]
     messages.extend(state["messages"][-10:])
     
@@ -405,9 +410,9 @@ Remember: Questions about medical topics = specialist | Personal health complain
             "active_node": handoff_result["active_node"],
             "awaiting_user_input": False
         }
-    
+
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "awaiting_user_input": True
     }
 
@@ -448,7 +453,7 @@ GUIDELINES:
             medical_response = client_manager.translate_text(medical_response, "english", language)
     
     # Fallback to Gemini if medical model unavailable
-    if not medical_response:
+    if True:#not medical_response:
         system_prompt = f"""You are an expert medical specialist communicating in {language}.
 
 CORE RESPONSIBILITIES:
@@ -489,8 +494,8 @@ Remember: Answer questions, don't diagnose. Personal symptoms require clerking."
                 "active_node": handoff_result["active_node"],
                 "awaiting_user_input": False
             }
-        
-        medical_response = response.content
+        if not medical_response:
+            medical_response = client_manager.extract_text(response.content)
     
     return {
         "messages": [AIMessage(content=medical_response)],
@@ -578,7 +583,7 @@ IMPORTANT:
         }
     
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "clerking_convo": state.get("clerking_convo", "") + clerking_addition,
         "awaiting_user_input": True
     }
@@ -633,7 +638,7 @@ Format as plain text without markdown. Use "S:", "O:", "A:", "P:" labels directl
 Be concise, professional, and use standard medical terminology."""
         
         response = llm.invoke([HumanMessage(content=soap_prompt)])
-        soap_summary = response.content.strip()
+        soap_summary = client_manager.extract_text(response.content).strip()
     
     logger.info("SOAP note generated successfully")
     
@@ -659,7 +664,7 @@ def handoff_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     search_results = state.get("doctor_preferences", {}).get("search_results", [])
     
     if search_results:
-        selection_keywords = ["select", "choose", "pick", "first", "second", "third", "1", "2", "3", "dr", "doctor"]
+        selection_keywords = ["select", "choose", "pick", "first", "second", "third", "fourth", "fifth", "1", "2", "3", "4", "5" "dr", "doctor", "one", "two", "three", "four", "five"]
         if any(word in last_msg for word in selection_keywords):
             selected_doctor = None
             
@@ -761,7 +766,7 @@ Remember: Your goal is finding the best match for the patient's needs and prefer
 """
             
             doctors_text += "\nWhich doctor would you prefer? You can choose by number or name."
-            full_response = response.content + doctors_text
+            full_response = client_manager.extract_text(response.content) + doctors_text
             
             if language != "english":
                 full_response = client_manager.translate_text(full_response, "english", language)
@@ -786,7 +791,7 @@ Remember: Your goal is finding the best match for the patient's needs and prefer
             }
     
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "awaiting_user_input": True
     }
 
@@ -974,6 +979,7 @@ async def handle_agent_interaction(user_input: UserMessage):
         # Extract response
         if state["messages"]:
             last_message = state["messages"][-1]
+            
             if isinstance(last_message, AIMessage):
                 logger.info(f"User: {user_input.message[:50]}...")
                 logger.info(f"Assistant: {last_message.content[:50]}...")
