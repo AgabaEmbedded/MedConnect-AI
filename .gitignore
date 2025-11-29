@@ -1,11 +1,11 @@
 output_main.png
-#post_request.py
+post_request.py
 Remote_Doc2.py
 remotedoc3.py
 request_model.py
 try.ipynb
 try.py
-#.env
+.env
 sample.wav
 translatev2.py
 translatev3.py
