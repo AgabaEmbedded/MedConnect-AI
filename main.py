@@ -1,12 +1,13 @@
 """
-Remote Medical Assistant - LangGraph MultiAgent System V2
-Enhanced architecture with clear node separation and handoff mechanisms
+Remote Medical Assistant - LangGraph MultiAgent System V3
+Refactored with improved architecture, error handling, and system prompts
 """
 
 import os
-from typing import TypedDict, Annotated, Optional
+from typing import TypedDict, Annotated, Optional, List, Dict, Any
 import json
 import operator
+from enum import Enum
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -16,29 +17,54 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
 from google.cloud import translate
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+import logging
 
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
+# ============================================================================
+# ENVIRONMENT SETUP
+# ============================================================================
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-parent = f"projects/medconnect-479308/locations/global"
+GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "medconnect-479308")
+RUNPOD_BASE_URL = os.getenv("RUNPOD_BASE_URL", "https://z8sgwy2614af6x-8000.proxy.runpod.net/v1")
 
-
-# ============================================================================
-# FASTAPI APPLICATION INITIALIZATION
-# ============================================================================
-app = FastAPI(
-    title="MedConnect Agent API",
-    description="A POST endpoint that processes a user message, pass it to the medical assistant agent and return the agent response."
-)
-
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is required")
 
 # ============================================================================
-# STATE DEFINITION
+# ENUMS
+# ============================================================================
+class NodeType(str, Enum):
+    """Available nodes in the system"""
+    CONTROLLER = "controller"
+    ORCHESTRATOR = "orchestrator"
+    SPECIALIST = "specialist"
+    CLERKING = "clerking"
+    SOAP_GENERATION = "soap_generation"
+    HANDOFF = "handoff"
+
+class ExperienceLevel(str, Enum):
+    """Doctor experience levels"""
+    JUNIOR = "junior"
+    MID_LEVEL = "mid-level"
+    SENIOR = "senior"
+    ANY = "any"
+
+# ============================================================================
+# TYPE DEFINITIONS
 # ============================================================================
 class DoctorInfo(TypedDict):
-
+    """Doctor information structure"""
     id: str
     name: str
     gender: str
@@ -47,146 +73,196 @@ class DoctorInfo(TypedDict):
     years_experience: int
     consultation_fee: int
     location: str
-    languages: list[str]
-    available_slots: list[str]
+    languages: List[str]
+    available_slots: List[str]
     response_time_avg: str
     experience_level: str
 
-
 class AgentState(TypedDict):
     """State shared across all nodes in the graph"""
-    messages: Annotated[list, operator.add]  # Full conversation history
-    active_node: str  # Current node in control: "orchestrator", "specialist", "clerking", "handoff"
-    
-    # Handoff tracking
-    handoff_summary: Optional[str]  # Summary when handing off between nodes
-    
-    # Clerking and medical data
-    clerking_convo: str  # All clerking conversations accumulated
-    soap_summary: Optional[str]  # SOAP note generated from clerking
-    
-    # Doctor matching
-    doctor_preferences: dict  # User preferences for doctor selection
-    matched_doctor: Optional[dict]  # Selected doctor information
-    
-    # Control flags
-    awaiting_user_input: bool  # Whether we're waiting for user response
-    conversation_ended: bool  # Whether conversation is complete
-
-
-    isdoctorid: bool    # if returning doctor id
-    request_doctor_list: bool   # to indicate if to request doctor list 
-    doctor_list: Optional[list[dict[str, any]]] # list of doctors from db Optional[List[DoctorInfo]]
-    selected_doctor : str   #selected doc id
-    language: str   #language the user is communicating in
-
-# ============================================================================
-# DEFINING API PAYLOAD
-# ============================================================================
-
-# Model for the user input
-class UserMessage(BaseModel):
-    """Defines the expected structure for the incoming POST request body."""
-    message: str # The message from the user
-    isdoctorlist: bool  # is the content of message doctor list
-    doctor_list: list[dict] #list of doctor from db
+    messages: Annotated[List, operator.add]
+    active_node: str
+    handoff_summary: Optional[str]
+    clerking_convo: str
+    soap_summary: Optional[str]
+    doctor_preferences: Dict[str, Any]
+    matched_doctor: Optional[DoctorInfo]
+    awaiting_user_input: bool
+    conversation_ended: bool
+    is_doctor_id: bool
+    request_doctor_list: bool
+    doctor_list: List[DoctorInfo]
+    selected_doctor: str
     language: str
 
+# ============================================================================
+# API MODELS
+# ============================================================================
+class UserMessage(BaseModel):
+    """User input structure"""
+    message: str = Field(..., min_length=1, description="User's message")
+    isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
+    doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
+    language: str = Field(default="english", description="User's preferred language")
 
-# Model for the outgoing response
 class AgentResponse(BaseModel):
-    """Defines the structure for the response sent back to the user."""
-    message: str #model response
-    doctorlist_request: bool    #requesting doctor list
-    isdoctorid: bool    #responding doctor id
-    doctorid: str   #id of selected doctor
+    """Agent response structure"""
+    message: str = Field(..., description="Agent's response message")
+    doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
+    isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
+    doctorid: str = Field(default="", description="Selected doctor ID")
+
+# ============================================================================
+# FASTAPI APPLICATION
+# ============================================================================
+app = FastAPI(
+    title="MedConnect Agent API",
+    description="Multi-agent medical assistant system with intelligent routing",
+    version="3.0.0"
+)
+
+# ============================================================================
+# CLIENT INITIALIZATION
+# ============================================================================
+class ClientManager:
+    """Manages external API clients"""
+    
+    def __init__(self):
+        self.openai_client: Optional[OpenAI] = None
+        self.translate_client: Optional[translate.TranslationServiceClient] = None
+        self.parent = f"projects/{GOOGLE_PROJECT_ID}/locations/global"
+        self._initialize_clients()
+    
+    def _initialize_clients(self):
+        """Initialize all external clients"""
+        # Initialize OpenAI client
+        try:
+            self.openai_client = OpenAI(
+                base_url=RUNPOD_BASE_URL,
+                api_key="not-needed"
+            )
+            logger.info("OpenAI client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {e}")
+        
+        # Initialize Translation client
+        try:
+            self.translate_client = translate.TranslationServiceClient()
+            logger.info("Translation client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize translation client: {e}")
+    
+    def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Translate text between languages"""
+        if not self.translate_client:
+            logger.warning("Translation client not available, returning original text")
+            return text
+        
+        try:
+            result = self.translate_client.translate_text(
+                parent=self.parent,
+                contents=[text],
+                source_language_code=source_lang[:2],
+                target_language_code=target_lang[:2],
+                mime_type="text/plain"
+            )
+            return result.translations[0].translated_text
+        except Exception as e:
+            logger.error(f"Translation failed: {e}")
+            return text
+    
+    def call_medical_llm(self, system_prompt: str, user_message: str) -> Optional[str]:
+        """Call the medical LLM model"""
+        if not self.openai_client:
+            logger.error("OpenAI client not available")
+            return None
+        
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Medical LLM call failed: {e}")
+            return None
+    def extract_text(self, content):
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Gemini list of parts
+            return "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        if isinstance(content, dict):
+            # Gemini { "parts": [...] }
+            parts = content.get("parts", [])
+            return "".join(
+                part.get("text", "") for part in parts if isinstance(part, dict)
+            )
+        return str(content)
+
+
+# Global client manager
+client_manager = ClientManager()
+
 # ============================================================================
 # LLM INITIALIZATION
 # ============================================================================
-
-def initialize_llm(api_key: str):
-    """Initialize Gemini model for all AI nodes"""
-    
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
+def initialize_llm(api_key: str) -> ChatGoogleGenerativeAI:
+    """Initialize Gemini model"""
+    return ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
         google_api_key=api_key,
         temperature=0.7
     )
-    
-    return llm
-
-try:
-    client = OpenAI(
-        base_url="https://z8sgwy2614af6x-8000.proxy.runpod.net/v1",
-        api_key="not-needed"  # or your actual key if you secured the pod
-    )
-    print("client initialized")
-except Exception as e:
-    print(f"Error initializing medconnectai: {e}!!!")
-
-try:
-    translate_client = translate.TranslationServiceClient()
-except Exception as e:
-    print(f"error initializing translate client: {e}")
-
-
-
 
 # ============================================================================
-# HANDOFF TOOLS DEFINITION
+# TOOL DEFINITIONS
 # ============================================================================
-
 @tool
-def orchestrator_handoff(node_to_handoff: str, summary: str) -> dict:
+def orchestrator_handoff(node_to_handoff: str, summary: str) -> Dict[str, str]:
     """
-    Handoff control from orchestrator to specialist or clerking node.
+    Handoff control from orchestrator to another node.
     
     Args:
         node_to_handoff: Target node ("specialist" or "clerking")
-        summary: Brief summary of the issue/context for the next node
+        summary: Brief summary of the issue for the next node
     
     Returns:
         Dictionary with handoff information
     """
-    print(f"\n{'-'*60}")
-    print(f"Handingoff to {node_to_handoff} Agent")
-    print(f"summary of issue: {summary}")
-    print(f"\n{'-'*60}")
-
+    logger.info(f"Orchestrator handing off to {node_to_handoff}: {summary}")
     return {
         "active_node": node_to_handoff,
         "handoff_summary": summary
     }
 
-
 @tool
-def specialist_handoff(node_to_handoff: str, summary: str) -> dict:
+def specialist_handoff(node_to_handoff: str, summary: str) -> Dict[str, str]:
     """
     Handoff control from specialist to clerking node.
     
     Args:
         node_to_handoff: Target node (typically "clerking")
-        summary: Brief summary of the medical query/complaint
+        summary: Brief summary of the medical complaint
     
     Returns:
         Dictionary with handoff information
     """
-
-    print(f"\n{'-'*60}")
-    print(f"Handingoff to {node_to_handoff} Agent")
-    print(f"summary of issue: {summary}")
-    print(f"\n{'-'*60}")
-
+    logger.info(f"Specialist handing off to {node_to_handoff}: {summary}")
     return {
         "active_node": node_to_handoff,
         "handoff_summary": summary
     }
 
-
 @tool
-def clerking_handoff(node_to_handoff: str, summary: str) -> dict:
+def clerking_handoff(node_to_handoff: str, summary: str) -> Dict[str, str]:
     """
-    Handoff control from clerking node to soap generation.
+    Handoff control from clerking to SOAP generation.
     
     Args:
         node_to_handoff: Target node (typically "soap_generation")
@@ -195,18 +271,11 @@ def clerking_handoff(node_to_handoff: str, summary: str) -> dict:
     Returns:
         Dictionary with handoff information
     """
-
-    print(f"\n{'-'*60}")
-    print(f"Handingoff to {node_to_handoff} Agent")
-    print(f"summary of issue: {summary}")
-    print(f"\n{'-'*60}")
-
-
+    logger.info(f"Clerking handing off to {node_to_handoff}: {summary}")
     return {
         "active_node": node_to_handoff,
         "handoff_summary": summary
     }
-
 
 @tool
 def doctor_search(
@@ -216,415 +285,295 @@ def doctor_search(
     experience_level: str = "any",
     availability: str = "any",
     gender: str = "any"
-) -> list:
+) -> tuple[List[DoctorInfo], str]:
     """
     Search for doctors based on user preferences.
     
     Args:
-        specialty: Medical specialty needed (e.g., "General Practitioner", "Cardiologist")
+        specialty: Medical specialty needed
         location: Preferred location
         max_price: Maximum consultation fee
-        experience_level: "junior", "mid-level", "senior", or "any"
-        availability: "immediate", "today", "this_week", or "any"
-        gender: "male", female, or any
+        experience_level: Preferred experience level
+        availability: Availability requirements
+        gender: Gender preference
     
     Returns:
-        List of matching doctors
+        Tuple of (matching doctors list, message)
     """
-
-    global state
-    # Mock doctor database - Replace with real database query
-    mock_doctors = state["doctor_list"]
-    found = 0
-    filtered = mock_doctors
-    # Filter by price
-    price_filtered = [d for d in filtered if d["consultation_fee"] <= max_price]
-    if price_filtered:
-        filtered = price_filtered
-        found +=1
-
-    # Filter by location
-    if location and location.lower() != "any":
-        location_filtered = [d for d in filtered if location.lower() in d["location"].lower()]
-        if location_filtered:
-            filtered = location_filtered
-            found +=1
-
-    #Filter by gender
-    if gender.lower() != "any":
-        gender_filtered = [d for d in filtered if d["gender"] == gender.lower()]
-        if gender_filtered:
-            filtered = gender_filtered
-            found +=1
+    # Get doctor list from global state
+    doctor_list = global_state.get("doctor_list", [])
     
+    if not doctor_list:
+        logger.warning("No doctors available in database")
+        return [], "No doctors available at the moment."
     
-    # Filter by experience level
-    if experience_level.lower() != "any":
-        experience_filtered = [d for d in filtered if d["experience_level"] == experience_level.lower()]
-        if experience_filtered:
-            filtered = experience_filtered
-            found +=1
-
+    filtered = doctor_list.copy()
+    criteria_met = 0
+    
+    # Apply filters
+    filters = [
+        ("price", lambda d: d["consultation_fee"] <= max_price),
+        ("location", lambda d: location.lower() == "any" or location.lower() in d["location"].lower()),
+        ("gender", lambda d: gender.lower() == "any" or d["gender"].lower() == gender.lower()),
+        ("experience", lambda d: experience_level.lower() == "any" or d["experience_level"].lower() == experience_level.lower()),
+    ]
+    
+    for filter_name, filter_func in filters:
+        temp_filtered = [d for d in filtered if filter_func(d)]
+        if temp_filtered:
+            filtered = temp_filtered
+            criteria_met += 1
+    
     # Filter by specialty
-    specialty_lower = specialty.lower()
-    
-    filtered_specialty = [d for d in filtered if specialty_lower in d["specialty"].lower()] 
-    # If no specialty match, return general practitioners
-    if filtered_specialty:
-        filtered = filtered_specialty
-        found +=1
+    specialty_filtered = [d for d in filtered if specialty.lower() in d["specialty"].lower()]
+    if specialty_filtered:
+        filtered = specialty_filtered
+        criteria_met += 1
     else:
-        filtered_specialty = [d for d in filtered if "General" in d["specialty"]]
-        if filtered_specialty:
-            filtered = filtered_specialty
+        # Fallback to general practitioners
+        gp_filtered = [d for d in filtered if "general" in d["specialty"].lower()]
+        if gp_filtered:
+            filtered = gp_filtered
     
     # Sort by rating and experience
-    filtered.sort(key=lambda x: (x["consultation_fee"], -x["rating"], -x["years_experience"]))
-
+    filtered.sort(key=lambda x: (-x["rating"], -x["years_experience"], x["consultation_fee"]))
     
-    if found<5:
-        return filtered[:5], "your perfect match wasn't found but these are doctors closest to your preferences\n\n"  # Return top 5 matches
-    else:
-        return filtered[:5], ""
-
-
+    # Determine message based on criteria met
+    message = "" if criteria_met >= 4 else "Your perfect match wasn't found, but these doctors closely match your preferences:\n\n"
+    
+    return filtered[:5], message
 
 # ============================================================================
-# NODE 1: CONTROLLER NODE (Rule-based)
+# NODE IMPLEMENTATIONS
 # ============================================================================
 
 def controller_node(state: AgentState) -> AgentState:
     """
     Routes user input to the appropriate active node.
-    Pure routing logic - no AI, no tools.
     """
-
-
     if not state.get("active_node"):
+        logger.info("Initializing new conversation")
         return {
-            "active_node": "orchestrator",  # Start with orchestrator
-            "handoff_summary": None,
-            "clerking_convo": "",
-            "soap_summary": None,
-            "doctor_preferences": {},
-            "matched_doctor": None,
-            "awaiting_user_input": True,
-            "conversation_ended": False,
-            "isdoctorid": False,
-            "request_doctor_list": False,
-            "doctor_list": [],
-            "selected_doctor" : ""
-
+            "active_node": NodeType.ORCHESTRATOR.value,
         }
     
-    #active = state.get("active_node", "orchestrator")
+    return {"awaiting_user_input": False}
+
+def orchestrator_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
+    """
+    Receptionist agent - handles greetings and routes to specialists.
+    """
+    language = state.get("language", "english")
     
-    # Simply pass through - routing handled by conditional edges
-    return {
-        "awaiting_user_input": False
-    }
+    system_prompt = f"""You are a professional medical receptionist assistant communicating in {language}.
+    you work for MedConnect a company that connects patients to doctor (like a medical freelance platform).
 
+CORE RESPONSIBILITIES:
+• Warmly greet patients and make them feel comfortable
+• Handle general conversations and answer basic non-medical questions
+• Identify when to route to medical specialists
+• Maintain a professional, empathetic tone
 
-# ============================================================================
-# NODE 2: ORCHESTRATOR NODE (AI-based)
-# ============================================================================
+ROUTING RULES:
+Use the orchestrator_handoff tool when:
 
-def orchestrator_node(state: AgentState, llm) -> AgentState:
-    """
-    Receptionist agent - handles greetings and non-medical conversations.
-    Hands off to specialist (medical queries) or clerking (medical complaints).
-    """
-    language = state["language"]
-    system_prompt = f"""You are a friendly and professional medical receptionist assistant, Communicate in {language} language. Your role:
+1. MEDICAL QUESTIONS → Route to "specialist"
+   - Patient asks about medical conditions, symptoms, treatments
+   - Questions like: "What causes headaches?", "Is aspirin safe?", "What is diabetes?"
+   
+2. MEDICAL COMPLAINTS → Route to "clerking"
+   - Patient describes personal health issues or symptoms
+   - Statements like: "I have a headache", "My chest hurts", "I've been coughing for 3 days"
 
-**RESPONSIBILITIES:**
-1. Greet users warmly and make them feel comfortable
-2. Handle general, non-medical conversations (greetings, how are you, general questions)
-3. Identify when conversations become medical and handoff appropriately
-4. Be empathetic, patient, and professional
+HANDOFF FORMAT:
+When routing, provide a concise 1-2 sentence summary of the patient's concern.
 
-**HANDOFF RULES:**
-- Use orchestrator_handoff to transfer control to another node
-- Handoff to "specialist" when user asks MEDICAL QUESTIONS or wants medical information
-  Examples: "What causes headaches?", "Is ibuprofen safe?", "What is diabetes?"
-- Handoff to "clerking" when user presents MEDICAL COMPLAINTS or health issues
-  Examples: "I have a headache", "My stomach hurts", "I've been coughing for 3 days"
+IMPORTANT GUIDELINES:
+• You do NOT provide medical advice or diagnoses
+• You are the first point of contact, not the medical expert
+• Be warm, professional, and efficient
+• Keep responses conversational and concise
 
-**HANDOFF FORMAT:**
-When handing off, provide a clear summary of the issue in 1-2 sentences.
-
-**IMPORTANT:**
-- You do NOT provide medical advice yourself
-- You do NOT diagnose or treat
-- You are the first point of contact, not the medical expert
-- Keep responses warm and concise
-
-Remember: Medical questions = specialist, Medical complaints = clerking"""
-
-    # Build message history
+Remember: Questions about medical topics = specialist | Personal health complaints = clerking"""
+    
     messages = [SystemMessage(content=system_prompt)]
-    
-    # Add conversation history (last 10 messages for context)
     messages.extend(state["messages"][-10:])
     
-    # Bind tools
     llm_with_tools = llm.bind_tools([orchestrator_handoff])
-    
-    # Invoke LLM
     response = llm_with_tools.invoke(messages)
     
-    # Check if tool was called
     if response.tool_calls:
-        
         tool_call = response.tool_calls[0]
-
-        # Execute the handoff
         handoff_result = orchestrator_handoff.invoke(tool_call["args"])
         
         return {
             "active_node": handoff_result["active_node"],
             "awaiting_user_input": False
         }
-    
-    # No handoff - continue conversation
+
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "awaiting_user_input": True
     }
 
-
-# ============================================================================
-# NODE 4: SPECIALIST NODE (AI-based)
-# ============================================================================
-
-def specialist_node(state: AgentState, llm) -> AgentState:
+def specialist_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     """
-    Medical specialist - answers medical questions and queries.
-    Hands off to clerking if user starts presenting complaints.
+    Medical specialist - answers medical questions.
     """
+    language = state.get("language", "english")
+    user_message = state["messages"][-1].content
+    
+    # Build conversation history
+    history = ""
+    for msg in state["messages"][:-1]:
+        role = "DOCTOR" if isinstance(msg, AIMessage) else "PATIENT"
+        history += f"{role}: {msg.content}\n"
+    
+    # Translate history if needed
+    if language != "english":
+        history = client_manager.translate_text(history, language, "english")
+    
+    # Try using specialized medical model
+    medical_response = None
+    if client_manager.openai_client:
+        system_prompt = f"""You are an expert medical doctor. Provide accurate, evidence-based answers.
 
-    try:
+CONVERSATION HISTORY:
+{history}
+
+GUIDELINES:
+• Answer clearly and concisely
+• Use simple language, avoid excessive jargon
+• Provide actionable information
+• Be empathetic and supportive"""
         
-        messages = state["messages"]
-
-        user_message = messages[-1].content
-        language = state["language"]
-        history = ""
+        medical_response = client_manager.call_medical_llm(system_prompt, user_message)
         
-        for message in messages[:-1]:
-            if isinstance(message, AIMessage):
-                history+=f"DOCTOR: {message.content}\n"
-            elif isinstance(message, HumanMessage):
-                history+=f"PATIENT: {message.content}\n"
+        if medical_response and language != "english":
+            medical_response = client_manager.translate_text(medical_response, "english", language)
+    
+    # Fallback to Gemini if medical model unavailable
+    if True:#not medical_response:
+        system_prompt = f"""You are an expert medical specialist communicating in {language}.
 
+CORE RESPONSIBILITIES:
+• Answer medical questions with accurate, evidence-based information
+• Explain conditions, medications, and treatments clearly
+• Detect when questions become personal health complaints
 
-        if language != "english":
+QUESTION vs COMPLAINT:
+• Question: "What causes migraines?" "How does insulin work?" "What is hypertension?"
+• Complaint: "I have a migraine" "My blood sugar is high" "My pressure is elevated"
 
-            history = translate_client.translate_text(
-            parent=parent,
-            contents=[history],
-            source_language_code = language[:2],
-            target_language_code= "en",
-            mime_type="text/plain", 
-            ).translations[0].translated_text
+HANDOFF RULE:
+Use specialist_handoff to route to "clerking" when:
+• Patient describes personal symptoms
+• Patient asks what to do about their own symptoms
+• Conversation shifts from general info to personal health concerns
 
-        print(f"\n{'#'*60}")
-        print(f"SPECIALIST HISTORY: {history}")
-        print(f"\n{'#'*60}")
+RESPONSE GUIDELINES:
+• Be thorough but concise
+• Use plain language
+• Always disclaim: "This is general information, not personal medical advice"
+• Be empathetic and supportive
+• If uncertain, recommend professional consultation
 
-        system_prompt = f"""You are a medical Doctor with expert knowledge respond accurately and concise.
+Remember: Answer questions, don't diagnose. Personal symptoms require clerking."""
 
-
-        Below is the conversation history the patient have had with you thus far
-        CONVERSATION HISTORY
-        {history}"""
-
-
-        response = client.chat.completions.create(
-                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
-                messages=[
-                {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                #max_tokens = 400
-                )
+        messages = [SystemMessage(content=system_prompt)]
+        messages.extend(state["messages"][-10:])
         
-
-        if language != "english":
+        llm_with_tools = llm.bind_tools([specialist_handoff])
+        response = llm_with_tools.invoke(messages)
         
-            AI_response = translate_client.translate_text(
-            parent=parent,
-            contents=[response.choices[0].message.content],
-            source_language_code = "en",
-            target_language_code= language[:2],
-            mime_type="text/plain", 
-            ).translations[0].translated_text
+        if response.tool_calls:
+            tool_call = response.tool_calls[0]
+            handoff_result = specialist_handoff.invoke(tool_call["args"])
             
-        else:
-            AI_response = response.choices[0].message.content
-
-        model_active = True
-
-    except Exception as e:
-        print(f"Unable to access model: {e}")
-        model_active = False
-    system_prompt = f"""You are an expert medical AI specialist, Communicate in {language} language. Your role:
-
-**RESPONSIBILITIES:**
-1. Answer medical questions with accurate, evidence-based information
-2. Explain medical concepts, conditions, medications, and treatments
-3. Provide health education and general medical guidance
-4. Detect when user shifts from ASKING to COMPLAINING
-
-**MEDICAL QUESTION vs COMPLAINT:**
-- Question: "What causes migraines?", "How does insulin work?", "What is hypertension?"
-- Complaint: "I have a migraine", "My blood sugar is high", "My blood pressure readings are..."
-
-**HANDOFF RULES:**
-- Use specialist_handoff to transfer to "clerking" when:
-  * User describes personal symptoms or health complaints
-  * User says they're experiencing a condition
-  * User asks "what should I do" about their symptoms
-  * Conversation shifts from general info to personal health issues
-
-**RESPONSE GUIDELINES:**
-- Be thorough but concise
-- Use simple language, avoid excessive medical jargon
-- Always include disclaimers: "This is general information, not personal medical advice"
-- Provide actionable information when appropriate
-- Be empathetic and supportive
-
-**IMPORTANT:**
-- You answer QUESTIONS, you don't diagnose CONDITIONS
-- When someone has symptoms, they need clerking/diagnosis, not just information
-- Always be conservative - if unsure, recommend professional consultation
-
-Remember: Questions = answer, Complaints = handoff to clerking"""
-
-    # Build message history
-    messages = [SystemMessage(content=system_prompt)]
+            return {
+                "active_node": handoff_result["active_node"],
+                "awaiting_user_input": False
+            }
+        if not medical_response:
+            medical_response = client_manager.extract_text(response.content)
     
-    # Add conversation history
-    messages.extend(state["messages"][-10:])
-
-    # Bind tools
-    llm_with_tools = llm.bind_tools([specialist_handoff])
-    
-    # Invoke LLM
-    response = llm_with_tools.invoke(messages)
-    
-    # Check if tool was called
-    if response.tool_calls:
-        tool_call = response.tool_calls[0]
-        
-        # Execute the handoff
-        handoff_result = specialist_handoff.invoke(tool_call["args"])
-        
-        return {
-            "active_node": handoff_result["active_node"],
-            "awaiting_user_input": False
-        }
-    
-    # No handoff - continue conversation
-    if model_active:
-        return {
-        "messages": [AIMessage(content=AI_response)],
+    return {
+        "messages": [AIMessage(content=medical_response)],
         "awaiting_user_input": True
     }
-    else:
-        return {
-            "messages": [AIMessage(content=response.content)],
-            "awaiting_user_input": True
-        }
 
-
-# ============================================================================
-# NODE 5: CLERKING NODE (AI-based)
-# ============================================================================
-
-def clerking_node(state: AgentState, llm) -> AgentState:
+def clerking_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     """
     Medical history collector - systematically clerks patient.
-    Accumulates all conversation in clerking_convo state.
     """
-    language = state["language"]
-    system_prompt = f"""You are a thorough medical history collection specialist (clerking agent), Communicate in {language} language. Your role:
+    language = state.get("language", "english")
+    
+    system_prompt = f"""You are a medical history collection specialist communicating in {language}.
 
-**RESPONSIBILITIES:**
-1. Systematically collect comprehensive medical history
-2. Ask relevant follow-up questions
-3. Cover all important aspects of the patient's complaint
-4. Know when you have sufficient information
+CORE RESPONSIBILITY:
+Systematically collect comprehensive medical history following standard medical clerking structure.
 
-**CLERKING STRUCTURE (Follow this flow):**
-1. **Chief Complaint**: What's the main problem? (already provided usually)
-2. **History of Present Illness**:
-   - When did it start?
-   - How did it develop/progress?
-   - Severity (scale 1-10)?
-   - Character/quality of symptoms?
-   - What makes it better/worse?
-   - Associated symptoms?
-3. **Past Medical History**:
-   - Any chronic conditions? (diabetes, hypertension, asthma, etc.)
-   - Previous hospitalizations or surgeries?
-4. **Medications & Allergies**:
-   - Current medications, supplements?
-   - Any drug allergies?
-5. **Social History** (brief):
-   - Smoking/alcohol use?
-   - Occupation?
-   - Recent travel?
-6. **Review of Systems** (if relevant):
-   - Any other symptoms anywhere?
+CLERKING FRAMEWORK (Follow in order):
 
-**CONVERSATION STYLE:**
-- Ask 1-2 questions at a time (don't overwhelm)
-- Be empathetic and reassuring
-- Acknowledge their concerns
-- Use simple language
-- Build rapport
+1. CHIEF COMPLAINT (usually already provided)
+   - Confirm the main problem
 
-**COMPLETION CRITERIA:**
-When you have covered the main points above and feel you have a clear picture of:
-- The chief complaint and its details
-- Relevant medical history
-- Current medications and allergies
-- Important context
+2. HISTORY OF PRESENT ILLNESS
+   - Onset: When did it start?
+   - Duration: How long has it lasted?
+   - Severity: Rate 1-10?
+   - Character: Describe the sensation (sharp, dull, throbbing, etc.)
+   - Aggravating/Relieving factors: What makes it worse or better?
+   - Associated symptoms: Any other symptoms?
 
-Then use clerking_handoff to move to "soap_generation" with summary: "Clerking completed, ready for SOAP note generation"
+3. PAST MEDICAL HISTORY
+   - Chronic conditions (diabetes, hypertension, asthma, etc.)
+   - Previous hospitalizations or surgeries
 
-**IMPORTANT:**
-- Don't rush - be thorough but efficient
-- Don't provide medical advice or diagnosis during clerking
-- Focus on GATHERING information, not giving it
-- Every question should have a purpose"""
+4. MEDICATIONS & ALLERGIES
+   - Current medications, supplements
+   - Known drug allergies
 
-    # Build message history
+5. SOCIAL HISTORY (brief)
+   - Smoking/alcohol use
+   - Occupation
+   - Recent travel
+
+6. REVIEW OF SYSTEMS (if relevant)
+   - Any other symptoms in other body systems
+
+CONVERSATION STYLE:
+• Ask 1-2 focused questions at a time
+• Be empathetic and reassuring
+• Acknowledge patient concerns
+• Use simple, clear language
+• Build rapport and trust
+
+COMPLETION CRITERIA:
+When you have comprehensive information covering the above areas, use clerking_handoff to move to "soap_generation" with summary: "Clerking completed, comprehensive history obtained"
+
+IMPORTANT:
+• Be thorough but efficient
+• Focus on GATHERING information, not providing advice
+• Do not diagnose during clerking
+• Every question should have clear clinical purpose"""
+
     messages = [SystemMessage(content=system_prompt)]
     
-    # Add clerking conversation history if exists
     if state.get("clerking_convo"):
-        messages.append(SystemMessage(content=f"Clerking so far:\n{state['clerking_convo']}"))
+        messages.append(SystemMessage(content=f"Clerking progress:\n{state['clerking_convo']}"))
     
-    # Add recent messages
     messages.extend(state["messages"][-5:])
     
-    # Bind tools
     llm_with_tools = llm.bind_tools([clerking_handoff])
-    
-    # Invoke LLM
     response = llm_with_tools.invoke(messages)
     
-    # Accumulate clerking conversation
+    # Accumulate conversation
     last_user_msg = state["messages"][-1].content if state["messages"] else ""
     clerking_addition = f"\nPatient: {last_user_msg}\nDoctor: {response.content}\n"
     
-    # Check if tool was called (clerking complete)
     if response.tool_calls:
         tool_call = response.tool_calls[0]
-        
-        # Execute the handoff
         handoff_result = clerking_handoff.invoke(tool_call["args"])
         
         return {
@@ -633,246 +582,197 @@ Then use clerking_handoff to move to "soap_generation" with summary: "Clerking c
             "awaiting_user_input": False
         }
     
-    # Continue clerking
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "clerking_convo": state.get("clerking_convo", "") + clerking_addition,
         "awaiting_user_input": True
     }
 
-
-# ============================================================================
-# NODE 6: SOAP GENERATION NODE (AI-based)
-# ============================================================================
-
-def soap_generation_node(state: AgentState, llm) -> AgentState:
+def soap_generation_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     """
     Generates SOAP note from clerking conversation.
-    No tools, no user interaction - just summarization.
     """
-    
     clerking_data = state.get("clerking_convo", "")
-    language = state["language"]
-
-    if language != "english":
-        clerking_data = translate_client.translate_text(
-            parent=parent,
-            contents=[clerking_data],
-            source_language_code = language[:2],
-            target_language_code= "en",
-            mime_type="text/plain", 
-            ).translations[0].translated_text
-        
-    print(f"\n{'#'*60}")
-    print(f"CLERKING DATA: {clerking_data}")
-    print(f"\n{'#'*60}")
-    try:
-        
-        system_prompt = """You are a medical Doctor with expert knowledge respond accurately and Create a Medical SOAP note summary from the dialogue, following these guidelines:
-                        S (Subjective): Summarize the patient's reported symptoms, including chief complaint and relevant history. Rely on the patient's statements as the primary source and ensure standardized terminology.
-                        O (Objective): Highlight critical findings such as vital signs, lab results, and imaging, emphasizing important details like the side of the body affected and specific dosages. Include normal ranges where relevant.
-                        A (Assessment): Offer a concise assessment combining subjective and objective data. State the primary diagnosis and any differential diagnoses, noting potential complications and the prognostic outlook.
-                        P (Plan): Outline the management plan, covering medication, diet, consultations, and education. Ensure to mention necessary referrals to other specialties and address compliance challenges.
-                        Considerations: Compile the report based solely on the transcript provided. Maintain confidentiality and document sensitively. Use concise medical jargon and abbreviations for effective doctor communication.
-                        Please format the summary in a clean, simple list format without using markdown or bullet points. Use 'S:', 'O:', 'A:', 'P:' directly followed by the text. Avoid any styling or special characters."""
+    language = state.get("language", "english")
     
+    # Translate to English if needed
+    if language != "english":
+        clerking_data = client_manager.translate_text(clerking_data, language, "english")
+    
+    logger.info(f"Generating SOAP note from clerking data (length: {len(clerking_data)})")
+    
+    # Try medical model first
+    soap_summary = None
+    if client_manager.openai_client:
+        system_prompt = """You are a medical documentation specialist. Create a professional SOAP note.
 
-        response = client.chat.completions.create(
-                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
-                messages=[
-                {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": clerking_data}
-                ]
-                )
-        soap_summary = response.choices[0].message.content
-    except Exception as e:
-        print(f"Unable to access model: {e}")
-        soap_prompt = f"""You are a medical documentation specialist. Generate a detailed professional SOAP note from this patient Doctor interaction.
+FORMAT:
+S (Subjective): Patient's reported symptoms, chief complaint, and relevant history
+O (Objective): Vital signs, lab results, physical findings (use placeholders if not provided)
+A (Assessment): Clinical assessment, primary diagnosis, differential diagnoses
+P (Plan): Management plan including medications, consultations, patient education
 
-                        **CLERKING CONVERSATION:**
-                        {clerking_data}
-
-                        Create a Medical SOAP note summary from the dialogue, following these guidelines:
-                        S (Subjective): Summarize the patient's reported symptoms, including chief complaint and relevant history. Rely on the patient's statements as the primary source and ensure standardized terminology.
-                        O (Objective): Highlight critical findings such as vital signs, lab results, and imaging, emphasizing important details like the side of the body affected and specific dosages. Include normal ranges where relevant.
-                        A (Assessment): Offer a concise assessment combining subjective and objective data. State the primary diagnosis and any differential diagnoses, noting potential complications and the prognostic outlook.
-                        P (Plan): Outline the management plan, covering medication, diet, consultations, and education. Ensure to mention necessary referrals to other specialties and address compliance challenges.
-                        Considerations: Compile the report based solely on the transcript provided. Maintain confidentiality and document sensitively. Use concise medical jargon and abbreviations for effective doctor communication.
-                        Please format the summary in a clean, simple list format without using markdown or bullet points. Use 'S:', 'O:', 'A:', 'P:' directly followed by the text. Avoid any styling or special characters.
-                        """
+GUIDELINES:
+• Base content solely on the provided transcript
+• Use standard medical terminology and abbreviations
+• Be concise and clinically relevant
+• Format as plain text: "S:", "O:", "A:", "P:" without markdown
+• Include only information explicitly stated or clearly implied"""
         
+        soap_summary = client_manager.call_medical_llm(system_prompt, clerking_data)
+    
+    # Fallback to Gemini
+    if not soap_summary:
+        soap_prompt = f"""Generate a professional SOAP note from this patient-doctor interaction:
 
+{clerking_data}
+
+Create a Medical SOAP note following these guidelines:
+
+S (Subjective): Summarize patient's reported symptoms, chief complaint, relevant history
+O (Objective): Document vital signs, findings, examination results (note if limited info available)
+A (Assessment): Provide clinical assessment, primary diagnosis, differential diagnoses
+P (Plan): Outline management including medications, referrals, patient education
+
+Format as plain text without markdown. Use "S:", "O:", "A:", "P:" labels directly.
+Be concise, professional, and use standard medical terminology."""
+        
         response = llm.invoke([HumanMessage(content=soap_prompt)])
-        
-        soap_summary = response.content.strip()
-
-    print(f"\n{'='*60}")
-    print(f"SOAP SUMMARY: \n{soap_summary}")
-    print(f"\n{'='*60}")
-
-    print(f"\n{'-'*60}")
-    print(f"Handingoff to Handoff Agent")
-    print(f"\n{'-'*60}")
+        soap_summary = client_manager.extract_text(response.content).strip()
+    
+    logger.info("SOAP note generated successfully")
     
     return {
         "soap_summary": soap_summary,
-        "active_node": "handoff",
+        "active_node": NodeType.HANDOFF.value,
         "awaiting_user_input": False,
-        "request_doctor_list": True,
+        "request_doctor_list": True
     }
 
-
-# ============================================================================
-# NODE 7: HANDOFF NODE (AI-based)
-# ============================================================================
-
-def handoff_node(state: AgentState, llm) -> AgentState:
+def handoff_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     """
-    Doctor matching and handoff agent.
-    Gathers user preferences and finds appropriate doctor.
+    Doctor matching and handoff coordinator.
     """
-    language = state["language"]
-    system_prompt = f"""You are a patient-doctor matching coordinator, communicate in {language} language. Your role:
-    
-**RESPONSIBILITIES:**
-1. Help patient find the right doctor for their needs by nicely requesting their preferences
-2. infer specialty of the required doctor from the patient-doctor conversation SOAP note
-3. Gather preferences if not already clear: [specialty, location, price range, experience level, gender]
-4. Use doctor_search tool to find matching doctors
-5. Present doctor options clearly and professionally
-
-**CONVERSATION FLOW:**
-1. If you have SOAP summary, acknowledge you understand their medical situation
-2. Ask about preferences (if not already gathered):
-   - Preferred location?
-   - Budget/price range for consultation?
-   - Preference for experience level? (junior/mid-level/senior doctors)
-   - Need immediate availability or flexible timing?
-3. Once you have sufficient preferences, use doctor_search tool which will takeover from there
-
-**DOCTOR SEARCH TOOL USAGE:**
-Call doctor_search with:
-- specialty: Infer From SOAP note recommendations
-- location: User's preferred location
-- max_price: User's budget (default 10000 if not specified)
-- experience_level: User preference (default "any")
-- availability: User's urgency needs
-- gender: if user prefer male or female doctor
-
-
-**IMPORTANT:**
-- Be helpful and patient
-- Don't push expensive options
-- Respect user's budget constraints
-- Provide multiple options when possible
-- Be transparent about doctor qualifications"""
-    # Check if user selected a doctor (simple heuristic)
+    language = state.get("language", "english")
     last_msg = state["messages"][-1].content.lower()
-
+    
+    # Translate for analysis if needed
     if language != "english":
-        last_msg = translate_client.translate_text(
-            parent=parent,
-            contents=[last_msg],
-            source_language_code = language[:2],
-            target_language_code= "en",
-            mime_type="text/plain", 
-            ).translations[0].translated_text
-        
-        
+        last_msg = client_manager.translate_text(last_msg, language, "english").lower()
+    
+    # Check for doctor selection
     search_results = state.get("doctor_preferences", {}).get("search_results", [])
     
-    if search_results and any(word in last_msg for word in ["select", "choose", "pick", "first", "second", "third", "1", "2", "3", "dr.", "doctor"]):
-        # Simple selection logic - try to identify which doctor
-        selected_doctor = None
-        
-        for i, doc in enumerate(search_results):
-            if str(i+1) in last_msg or doc['name'].lower() in last_msg:
-                selected_doctor = doc
-                break
-        
-        if not selected_doctor:
-            selected_doctor = search_results[0]  # Default to first
-        
-        return_message = f"Perfect! I'll connect you with **{selected_doctor['name']}**. They will receive your medical summary and contact you at your earliest available slot: {selected_doctor['available_slots'][0]}. Is there anything else you'd like to know before I finalize the connection?"
+    if search_results:
+        selection_keywords = ["select", "choose", "pick", "first", "second", "third", "fourth", "fifth", "1", "2", "3", "4", "5" "dr", "doctor", "one", "two", "three", "four", "five"]
+        if any(word in last_msg for word in selection_keywords):
+            selected_doctor = None
+            
+            # Try to identify selected doctor
+            for i, doc in enumerate(search_results):
+                if str(i + 1) in last_msg or doc['name'].lower() in last_msg:
+                    selected_doctor = doc
+                    break
+            
+            if not selected_doctor:
+                selected_doctor = search_results[0]
+            
+            confirmation_msg = f"Perfect! I'll connect you with **{selected_doctor['name']}** ({selected_doctor['specialty']}). They will receive your medical summary and contact you at: {selected_doctor['available_slots'][0]}.\n\nIs there anything else you'd like to know?"
+            
+            if language != "english":
+                confirmation_msg = client_manager.translate_text(confirmation_msg, "english", language)
+            
+            return {
+                "messages": [AIMessage(content=confirmation_msg)],
+                "matched_doctor": selected_doctor,
+                "selected_doctor": selected_doctor['id'],
+                "is_doctor_id": True,
+                "awaiting_user_input": False,
+                "conversation_ended": True
+            }
+    
+    # Continue doctor matching conversation
+    system_prompt = f"""You are a patient-doctor matching coordinator communicating in {language}.
 
-        if language != "english":
-            return_message = translate_client.translate_text(
-            parent=parent,
-            contents=[return_message],
-            source_language_code = "en",
-            target_language_code= language[:2],
-            mime_type="text/plain", 
-            ).translations[0].translated_text
-            
-            
-        return {
-            "messages": [AIMessage(content=return_message)],
-            "matched_doctor": selected_doctor,
-            "isdoctorid": True,
-            "awaiting_user_input": False,
-            "conversation_ended": True
-        }
-    # Build message historyyyyy
+CORE RESPONSIBILITIES:
+• Help patients find the right doctor for their medical needs
+• Gather preferences systematically
+• Use doctor_search tool to find matching doctors
+• Present options clearly and professionally
+
+CONVERSATION FLOW:
+
+1. ACKNOWLEDGE MEDICAL SITUATION
+   If SOAP summary exists, acknowledge understanding of their condition
+
+2. GATHER PREFERENCES (ask naturally, not as a form):
+   - Specialty needed (infer from SOAP note if available)
+   - Preferred location
+   - Budget/consultation fee range
+   - Experience level preference (junior/mid-level/senior)
+   - Gender preference (if any)
+   - Availability urgency
+
+3. SEARCH FOR DOCTORS
+   Once you have key preferences, use doctor_search tool with:
+   • specialty: Inferred from SOAP recommendations
+   • location: User's preference (default "Any")
+   • max_price: Budget (default 10000)
+   • experience_level: Preference (default "any")
+   • availability: Urgency (default "any")
+   • gender: Preference (default "any")
+
+4. PRESENT OPTIONS
+   After search, present doctors clearly with all relevant details
+
+IMPORTANT GUIDELINES:
+• Be patient and helpful
+• Respect budget constraints
+• Don't push expensive options
+• Provide multiple options when available
+• Be transparent about qualifications
+• Ask clarifying questions if preferences unclear
+
+Remember: Your goal is finding the best match for the patient's needs and preferences."""
+
     messages = [SystemMessage(content=system_prompt)]
     
-
-    # Add SOAP summary context
     if state.get("soap_summary"):
         messages.append(SystemMessage(content=f"Patient's Medical Summary:\n{state['soap_summary']}"))
     
-    # Add previous doctor preferences if any
     if state.get("doctor_preferences"):
-        messages.append(SystemMessage(content=f"Initial preferences: {json.dumps(state['doctor_preferences'])}"))
+        messages.append(SystemMessage(content=f"Gathered preferences: {json.dumps(state['doctor_preferences'])}"))
     
-    # Add conversation history
     messages.extend(state["messages"][-10:])
     
-    # Bind tools
     llm_with_tools = llm.bind_tools([doctor_search])
-    
-    # Invoke LLM
     response = llm_with_tools.invoke(messages)
     
-    # Check if tool was called
     if response.tool_calls:
-
-        
-     
         tool_call = response.tool_calls[0]
+        doctors, search_message = doctor_search.invoke(tool_call["args"])
         
-        # Execute doctor search
-        doctors, return_message = doctor_search.invoke(tool_call["args"])
-        
-        # Format doctor results
         if doctors:
-            doctors_text = f"\n\n{return_message}**Available Doctors:**\n\n"
+            doctors_text = f"\n\n{search_message}**Available Doctors:**\n\n"
             for i, doc in enumerate(doctors, 1):
                 doctors_text += f"""**{i}. {doc['name']}** - {doc['specialty']}
-   ⭐ Rating: {doc['rating']}/5.0 | 📅 Experience: {doc['years_experience']} years
-   💰 Fee: ₦{doc['consultation_fee']:,} | 📍 {doc['location']}
+   ⭐ Rating: {doc['rating']}/5.0 | 📅 {doc['years_experience']} years experience
+   💰 Consultation Fee: ₦{doc['consultation_fee']:,}
+   📍 Location: {doc['location']}
    🗣️ Languages: {', '.join(doc['languages'])}
    ⏰ Available: {', '.join(doc['available_slots'][:3])}
-   ⚡ Avg Response: {doc['response_time_avg']}
+   ⚡ Avg Response Time: {doc['response_time_avg']}
 
 """
             
-            doctors_text += "\nWhich doctor would you prefer? Please let me know by number or name."
+            doctors_text += "\nWhich doctor would you prefer? You can choose by number or name."
+            full_response = client_manager.extract_text(response.content) + doctors_text
             
-            doctor_text = response.content + "\n\n" + doctors_text
-
             if language != "english":
-                doctor_text = translate_client.translate_text(
-                parent=parent,
-                contents=[doctor_text],
-                source_language_code = "en",
-                target_language_code= language[:2],
-                mime_type="text/plain", 
-                ).translations[0].translated_text
-                
+                full_response = client_manager.translate_text(full_response, "english", language)
             
-            # Store doctors in state for selectionn
             return {
-                "messages": [AIMessage(content=doctor_text)],
+                "messages": [AIMessage(content=full_response)],
                 "doctor_preferences": {
                     **state.get("doctor_preferences", {}),
                     "search_results": doctors
@@ -880,30 +780,20 @@ Call doctor_search with:
                 "awaiting_user_input": True
             }
         else:
-            notfound_text = "I couldn't find any doctors matching those specific criteria. Could you adjust your preferences? For example, a different location or higher budget?"
+            no_match_msg = "I couldn't find doctors matching those exact criteria. Could you adjust your preferences? For example, try a different location, higher budget, or broader specialty?"
+            
             if language != "english":
-                notfound_text = translate_client.translate_text(
-                parent=parent,
-                contents=[notfound_text],
-                source_language_code = "en",
-                target_language_code= language[:2],
-                mime_type="text/plain", 
-                ).translations[0].translated_text
-                
+                no_match_msg = client_manager.translate_text(no_match_msg, "english", language)
+            
             return {
-                "messages": [AIMessage(content=notfound_text)],
+                "messages": [AIMessage(content=no_match_msg)],
                 "awaiting_user_input": True
             }
     
-    
-    
-    # Continue gathering preferences
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
         "awaiting_user_input": True
     }
-
-
 
 # ============================================================================
 # ROUTING FUNCTIONS
@@ -911,71 +801,47 @@ Call doctor_search with:
 
 def route_from_controller(state: AgentState) -> str:
     """Route from controller to active node"""
-    active = state.get("active_node", "orchestrator")
-    
-    if active == "orchestrator":
-        return "orchestrator"
-    elif active == "specialist":
-        return "specialist"
-    elif active == "clerking":
-        return "clerking"
-    elif active == "handoff":
-        return "handoff"
-    else:
-        return "orchestrator"  # Default
-
+    active = state.get("active_node", NodeType.ORCHESTRATOR.value)
+    return active
 
 def route_from_orchestrator(state: AgentState) -> str:
     """Route from orchestrator"""
-    active = state.get("active_node", "end")
-    if state.get("awaiting_user_input") and active == "orchestrator":
-        return "end"  # Go to end to wait for user
-    elif active == "clerking":
-        return "clerking"  # Handoff occurred
-    elif active == "specialist":
-        return "specialist"
-    else:
+    if state.get("awaiting_user_input"):
         return "end"
-
+    
+    active = state.get("active_node", NodeType.ORCHESTRATOR.value)
+    if active in [NodeType.SPECIALIST.value, NodeType.CLERKING.value]:
+        return active
+    return "end"
 
 def route_from_specialist(state: AgentState) -> str:
     """Route from specialist"""
-    active = state.get("active_node", "end")
-    if state.get("awaiting_user_input") and active == "specialist":
+    if state.get("awaiting_user_input"):
         return "end"
-    elif active == "clerking":
-        return "clerking"
-    else: return "end"
-
+    
+    if state.get("active_node") == NodeType.CLERKING.value:
+        return NodeType.CLERKING.value
+    return "end"
 
 def route_from_clerking(state: AgentState) -> str:
     """Route from clerking"""
-    active = state.get("active_node", "end")
-    if state.get("awaiting_user_input") and active == "clerking":
+    if state.get("awaiting_user_input"):
         return "end"
-    elif active == "soap_generation":
-        return "soap_generation"
-    else: return "end"
-
-
-
+    
+    if state.get("active_node") == NodeType.SOAP_GENERATION.value:
+        return NodeType.SOAP_GENERATION.value
+    return "end"
 
 # ============================================================================
 # GRAPH CONSTRUCTION
 # ============================================================================
 
 def create_medical_assistant_graph(api_key: str) -> StateGraph:
-    """
-    Creates the complete LangGraph workflow.
-    """
-    
-    # Initialize LLM
+    """Creates the complete LangGraph workflow"""
     llm = initialize_llm(api_key)
-    
-    # Create graph
     workflow = StateGraph(AgentState)
     
-    # Add all nodes
+    # Add nodes
     workflow.add_node("controller", controller_node)
     workflow.add_node("orchestrator", lambda state: orchestrator_node(state, llm))
     workflow.add_node("specialist", lambda state: specialist_node(state, llm))
@@ -986,27 +852,24 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
     # Set entry point
     workflow.set_entry_point("controller")
     
-    
-    # Controller routes to active node
+    # Define edges
     workflow.add_conditional_edges(
         "controller",
         route_from_controller,
         {
-            "orchestrator": "orchestrator",
-            "specialist": "specialist",
-            "clerking": "clerking",
-            "handoff": "handoff",
-            #"soap_generation": "soap_generation"
+            NodeType.ORCHESTRATOR.value: "orchestrator",
+            NodeType.SPECIALIST.value: "specialist",
+            NodeType.CLERKING.value: "clerking",
+            NodeType.HANDOFF.value: "handoff"
         }
     )
     
-    # Each node can either return to controller (after handoff) or end (await user input)
     workflow.add_conditional_edges(
         "orchestrator",
         route_from_orchestrator,
         {
-            "specialist": "specialist",
-            "clerking": "clerking",
+            NodeType.SPECIALIST.value: "specialist",
+            NodeType.CLERKING.value: "clerking",
             "end": END
         }
     )
@@ -1015,7 +878,7 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
         "specialist",
         route_from_specialist,
         {
-            "clerking": "clerking",
+            NodeType.CLERKING.value: "clerking",
             "end": END
         }
     )
@@ -1024,26 +887,28 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
         "clerking",
         route_from_clerking,
         {
-            "soap_generation": "soap_generation",
+            NodeType.SOAP_GENERATION.value: "soap_generation",
             "end": END
         }
     )
     
     workflow.add_edge("soap_generation", "handoff")
-    
     workflow.add_edge("handoff", END)
     
     return workflow.compile()
 
-
 # ============================================================================
-# CONVERSATION RUNNER
+# GLOBAL STATE MANAGEMENT
 # ============================================================================
 
-def run_conversation_turn(graph, user_input: dict, state: AgentState = None) -> AgentState:
-    """
-    Process a single user message through the graph.
-    """
+global_state = {}
+
+def run_conversation_turn(
+    graph: StateGraph,
+    user_input: UserMessage,
+    state: Optional[AgentState] = None
+) -> AgentState:
+    """Process a single user message through the graph"""
     
     # Initialize state if first interaction
     if state is None:
@@ -1057,104 +922,136 @@ def run_conversation_turn(graph, user_input: dict, state: AgentState = None) -> 
             "matched_doctor": None,
             "awaiting_user_input": False,
             "conversation_ended": False,
-            "isdoctorid": False,
+            "is_doctor_id": False,
             "request_doctor_list": False,
             "doctor_list": [],
-            "selected_doctor" : "",
+            "selected_doctor": "",
             "language": "english"
         }
     
-    # Add user message to state
+    # Update state with user input
     state["messages"].append(HumanMessage(content=user_input.message))
+    
     if user_input.isdoctorlist:
         state["doctor_list"] = user_input.doctor_list
+        global_state["doctor_list"] = user_input.doctor_list
+    
     state["language"] = user_input.language.lower()
     
-    
-    # Run the graph
-    result = graph.invoke(state)
-    
-    return result
-
+    # Run graph
+    try:
+        result = graph.invoke(state)
+        return result
+    except Exception as e:
+        logger.error(f"Error in graph execution: {e}")
+        raise HTTPException(status_code=500, detail=f"Graph execution failed: {str(e)}")
 
 # ============================================================================
-# MAIN EXECUTION & DEMO
+# API ENDPOINTS
 # ============================================================================
 
-
-# ==================== INITIALIZE SYSTEM ====================
-print("\n" + "="*70)
-print("🏥 REMOTE MEDICAL ASSISTANT - Multi-Agent System")
-print("="*70)
-print("\n📋 Initializing agents...")
-
+# Initialize graph at startup
+logger.info("Initializing medical assistant graph...")
 graph = create_medical_assistant_graph(GEMINI_API_KEY)
+logger.info("Graph initialized successfully")
 
-print("✅ System ready!")
-print("\n" + "="*70)
-print("ARCHITECTURE:")
-print("  • Orchestrator: Handles greetings & general chat")
-print("  • Specialist: Answers medical questions")
-print("  • Clerking: Collects medical history")
-print("  • SOAP Generator: Creates medical summary")
-print("  • Handoff: Matches patients with doctors")
-print("="*70)
+# Conversation state storage (in production, use proper session management)
+conversation_states = {}
 
-# ==================== INTERACTIVE MODE ====================
-print("\n🗣️  INTERACTIVE MODE")
-#print("Type your messages below. Type 'quit' or 'exit' to end.\n")
-
-state = None
-conversation_count = 0
-
-@app.post(
-"/conversation", 
-response_model=AgentResponse,
-summary="Receives a user message, pass to the agent and return agent response."
-)
-def handle_agent_interaction(user_input: UserMessage):
+@app.post("/conversation", response_model=AgentResponse)
+async def handle_agent_interaction(user_input: UserMessage):
     """
-    This POST request:
-    1. Receives the user's and message.
-    2. pass it to the agent
-    3. Generates and returns a agent response.
-    """
-    global state, conversation_count
-
-    state = run_conversation_turn(graph, user_input, state)
-
-    if state["messages"]:
-        last_message = state["messages"][-1]
-        if isinstance(last_message, AIMessage):
-            print(F"\n👤 YOU: {user_input.message}")
-            print(f"\n🤖 ASSISTANT: {last_message.content}")
-            conversation_count+=1
-            print(f"\nconversation count: {conversation_count}")
-    # Display state info (optional - for debugging)
-    if state.get("active_node"):
-        print(f"\n📊 [Active Node: {state['active_node']}, language: {state['language']}]\n", end="\n")
-    message = last_message.content
+    Process user message and return agent response.
     
-    if state["request_doctor_list"]:
-        state["request_doctor_list"] = False
-        return AgentResponse(
-            message=message,
-            doctorlist_request =True,
-            isdoctorid= False,
-            doctorid = ""
-        )
-    elif state["isdoctorid"]:
-        state["isdoctorid"] = False
-        return AgentResponse(
-            message=message,
-            doctorlist_request =False,
-            isdoctorid= True,
-            doctorid= state["selected_doctor"]
-        )
-    else:
-        return AgentResponse(
-            message=message,
-            doctorlist_request =False,
-            isdoctorid= False,
-            doctorid= ""
-        )
+    In production, implement proper session management with user IDs.
+    """
+    try:
+        # Get or create conversation state
+        # Note: Using a single global state for demo - implement proper session management
+        state = conversation_states.get("default")
+        
+        # Process message
+        state = run_conversation_turn(graph, user_input, state)
+        
+        # Store updated state
+        conversation_states["default"] = state
+        
+        # Extract response
+        if state["messages"]:
+            last_message = state["messages"][-1]
+            
+            if isinstance(last_message, AIMessage):
+                logger.info(f"User: {user_input.message[:50]}...")
+                logger.info(f"Assistant: {last_message.content[:50]}...")
+                logger.info(f"Active node: {state.get('active_node')}, Language: {state.get('language')}")
+                
+                message = last_message.content
+                
+                # Determine response type
+                if state.get("request_doctor_list"):
+                    state["request_doctor_list"] = False
+                    return AgentResponse(
+                        message=message,
+                        doctorlist_request=True,
+                        isdoctorid=False,
+                        doctorid=""
+                    )
+                elif state.get("is_doctor_id"):
+                    state["is_doctor_id"] = False
+                    return AgentResponse(
+                        message=message,
+                        doctorlist_request=False,
+                        isdoctorid=True,
+                        doctorid=state.get("selected_doctor", "")
+                    )
+                else:
+                    return AgentResponse(
+                        message=message,
+                        doctorlist_request=False,
+                        isdoctorid=False,
+                        doctorid=""
+                    )
+        
+        raise HTTPException(status_code=500, detail="No response generated")
+        
+    except Exception as e:
+        logger.error(f"Error handling conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "services": {
+            "openai": client_manager.openai_client is not None,
+            "translation": client_manager.translate_client is not None,
+            "graph": graph is not None
+        }
+    }
+
+@app.post("/reset")
+async def reset_conversation():
+    """Reset conversation state"""
+    conversation_states.clear()
+    logger.info("Conversation state reset")
+    return {"status": "reset successful"}
+
+# ============================================================================
+# STARTUP
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Log startup information"""
+    logger.info("="*70)
+    logger.info("🏥 MEDCONNECT MULTI-AGENT SYSTEM STARTED")
+    logger.info("="*70)
+    logger.info("Available nodes:")
+    for node in NodeType:
+        logger.info(f"  • {node.value}")
+    logger.info("="*70)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

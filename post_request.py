@@ -2,8 +2,10 @@ import requests
 import json
 
 # The server URL and endpoint path
+
 #API_URL = "http://127.0.0.1:8000/conversation"
 API_URL = "https://medconnect-ai-4fnj.onrender.com/conversation"
+
 mock_doctors = [
         {
             "id": "DOC001",
@@ -81,10 +83,13 @@ while True:
                   
         payload =  {
         "message": user_entry,
-        "isdoctorlist": False,
+        "isdoctorlist": True,
         "doctor_list": mock_doctors,
         "language": language
         }
+        print(f"\n{'*'*60}")
+        print("doctor list sent")
+        print(f"{'*'*60}")
     
     else:
          payload =  {
