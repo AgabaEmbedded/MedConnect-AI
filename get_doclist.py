@@ -17,7 +17,7 @@ try:
     response_data = response.json()
     
     #print("\n--- Extracted Greeting ---")
-    print(f"\n🤖 ASSISTANT: {response_data}")
+    print(f"\n🤖 ASSISTANT: {[doc for doc in response_data if doc["verified"] and doc["role"]=="doctor" ]}")
 
 except requests.exceptions.RequestException as e:
     print(f"An error occurred: {e}")
