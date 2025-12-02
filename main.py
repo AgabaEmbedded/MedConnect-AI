@@ -4,15 +4,17 @@ Refactored with improved architecture, error handling, and system prompts
 """
 
 import os
+import base64
 import requests
 from typing import TypedDict, Annotated, Optional, List, Dict, Any
 import json
 import operator
 from enum import Enum
 from openai import OpenAI
+from spitch import Spitch
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-
+from doclist import dummy_doctors
 
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -24,6 +26,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import logging
 
+# pyright: reportReturnType=false
+# pyright: reportGeneralTypeIssues=false
+# pyright: reportOptionalMemberAccess=false
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -104,16 +109,18 @@ class AgentState(TypedDict):
 # ============================================================================
 class UserMessage(BaseModel):
     """User input structure"""
-    message: str = Field(..., min_length=1, description="User's message")
+    audio: str = Field("", min_length=0, description = "Base64 encode audio file")
+    message: str = Field("", min_length=0, description="User's message")
     #isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
     #doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
     language: str = Field(default="english", description="User's preferred language")
 
 class AgentResponse(BaseModel):
     """Agent response structure"""
+    audio: str = Field("", min_length=0, description="base64 encoded audion")
     message: str = Field(..., description="Agent's response message")
     #doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
-    isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
+    #isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
     doctorid: str = Field(default="", description="Selected doctor ID")
 
 # ============================================================================
@@ -136,6 +143,12 @@ class ClientManager:
         self.translate_client: Optional[translate.TranslationServiceClient] = None
         self.parent = f"projects/{GOOGLE_PROJECT_ID}/locations/global"
         self._initialize_clients()
+        self.voice_dict = {
+            "english": "comfort",
+            "hausa": "zainab",
+            "yoruba": "sade",
+            "igbo": "amara"
+        }
     
     def _initialize_clients(self):
         """Initialize all external clients"""
@@ -155,6 +168,14 @@ class ClientManager:
             logger.info("Translation client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize translation client: {e}")
+
+        # Initialize spitch client
+        try:
+            self.spitch_client  = Spitch()
+            logger.info("Spitch client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize spitch client: {e}")
+
     
     def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate text between languages"""
@@ -212,6 +233,7 @@ class ClientManager:
 
 # Global client manager
 client_manager = ClientManager()
+spitch_client = Spitch()
 
 # ============================================================================
 # LLM INITIALIZATION
@@ -227,459 +249,6 @@ def initialize_llm(api_key: str) -> ChatGoogleGenerativeAI:
 # ============================================================================
 # TOOL  AND METHODS DEFINITIONS
 # ============================================================================
-dummy_doctors = [
-  {
-    "id": "doc-001",
-    "name": "Dr. Adebayo Musa",
-    "email": "adebayo.musa@example.com",
-    "password": "hashed_password",
-    "phone": "+2348011111111",
-    "gender": "male",
-    "specialty": "Cardiology",
-    "years_experience": 12,
-    "consultation_fee": 15000,
-    "rating":4.5,
-    "location": "Lagos",
-    "languages": ["English", "Yoruba"],
-    "available_slots": [
-      { "start": "09:00", "end": "12:00", "day": "Monday" },
-      { "start": "14:00", "end": "18:00", "day": "Wednesday" }
-    ],
-    "response_time_avg": 15,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Cardiology Unit",
-    "hospital_affiliation": "Lagos University Teaching Hospital",
-    "recordIds": ["rec-101"],
-    "licenceNo": "MDCN/001001",
-    "verified": True
-  },
-
-  {
-    "id": "doc-002",
-    "name": "Dr. Sandra Okoro",
-    "email": "sandra.okoro@example.com",
-    "password": "hashed_password",
-    "phone": "+2348022222222",
-    "gender": "female",
-    "specialty": "Pediatrics",
-    "years_experience": 7,
-    "rating":4.5,
-    "consultation_fee": 12000,
-    "location": "Abuja",
-    "languages": ["English", "Igbo"],
-    "available_slots": [
-      { "start": "10:00", "end": "13:00", "day": "Tuesday" },
-      { "start": "15:00", "end": "18:00", "day": "Friday" }
-    ],
-    "response_time_avg": 20,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Pediatrics",
-    "hospital_affiliation": "National Hospital Abuja",
-    "recordIds": ["rec-102"],
-    "licenceNo": "MDCN/001002",
-    "verified": True
-  },
-
-  {
-    "id": "doc-003",
-    "name": "Dr. Chinedu Eze",
-    "email": "chinedu.eze@example.com",
-    "password": "hashed_password",
-    "phone": "+2348033333333",
-    "gender": "male",
-    "specialty": "Neurology",
-    "rating":4.5,
-    "years_experience": 15,
-    "consultation_fee": 25000,
-    "location": "Enugu",
-    "languages": ["English", "Igbo"],
-    "available_slots": [
-      { "start": "08:00", "end": "11:00", "day": "Monday" },
-      { "start": "13:00", "end": "16:00", "day": "Thursday" }
-    ],
-    "response_time_avg": 10,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Neurology",
-    "hospital_affiliation": "Enugu State University Teaching Hospital",
-    "recordIds": ["rec-103"],
-    "licenceNo": "MDCN/001003",
-    "verified": True
-  },
-
-  {
-    "id": "doc-004",
-    "name": "Dr. Mariam Abdullahi",
-    "email": "mariam.abdullahi@example.com",
-    "password": "hashed_password",
-    "phone": "+2348044444444",
-    "gender": "female",
-    "specialty": "Dermatology",
-    "years_experience": 9,
-    "rating":4.5,
-    "consultation_fee": 10000,
-    "location": "Kano",
-    "languages": ["English", "Hausa"],
-    "available_slots": [
-      { "start": "09:00", "end": "12:00", "day": "Wednesday" },
-      { "start": "14:00", "end": "17:00", "day": "Saturday" }
-    ],
-    "response_time_avg": 25,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Dermatology",
-    "hospital_affiliation": "Aminu Kano Teaching Hospital",
-    "recordIds": ["rec-104"],
-    "licenceNo": "MDCN/001004",
-    "verified": True
-  },
-
-  {
-    "id": "doc-005",
-    "name": "Dr. Olawale Tomori",
-    "email": "olawale.tomori@example.com",
-    "password": "hashed_password",
-    "phone": "+2348055555555",
-    "gender": "male",
-    "rating":4.5,
-    "specialty": "Orthopedics",
-    "years_experience": 11,
-    "consultation_fee": 18000,
-    "location": "Ibadan",
-    "languages": ["English", "Yoruba"],
-    "available_slots": [
-      { "start": "10:00", "end": "14:00", "day": "Monday" },
-      { "start": "16:00", "end": "19:00", "day": "Thursday" }
-    ],
-    "response_time_avg": 18,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Orthopedics",
-    "hospital_affiliation": "University College Hospital Ibadan",
-    "recordIds": ["rec-105"],
-    "licenceNo": "MDCN/001005",
-    "verified": True
-  },
-
-  {
-    "id": "doc-006",
-    "name": "Dr. Hauwa Sani",
-    "email": "hauwa.sani@example.com",
-    "password": "hashed_password",
-    "phone": "+2348066666666",
-    "rating":4.5,
-    "gender": "female",
-    "specialty": "Obstetrics & Gynecology",
-    "years_experience": 8,
-    "consultation_fee": 20000,
-    "location": "Kaduna",
-    "languages": ["English", "Hausa"],
-    "available_slots": [
-      { "start": "08:00", "end": "12:00", "day": "Tuesday" },
-      { "start": "15:00", "end": "18:00", "day": "Friday" }
-    ],
-    "response_time_avg": 22,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "OB/GYN",
-    "hospital_affiliation": "Barau Dikko Teaching Hospital",
-    "recordIds": ["rec-106"],
-    "licenceNo": "MDCN/001006",
-    "verified": True
-  },
-
-  {
-    "id": "doc-007",
-    "name": "Dr. Femi Akinlade",
-    "email": "femi.akinlade@example.com",
-    "password": "hashed_password",
-    "phone": "+2348077777777",
-    "gender": "male",
-    "specialty": "General Surgery",
-    "years_experience": 13,
-    "consultation_fee": 22000,\
-    "rating":4.5,
-    "location": "Abeokuta",
-    "languages": ["English", "Yoruba"],
-    "available_slots": [
-      { "start": "09:00", "end": "11:00", "day": "Monday" },
-      { "start": "14:00", "end": "17:00", "day": "Thursday" }
-    ],
-    "response_time_avg": 12,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Surgery",
-    "hospital_affiliation": "Federal Medical Centre Abeokuta",
-    "recordIds": ["rec-107"],
-    "licenceNo": "MDCN/001007",
-    "verified": True
-  },
-
-  {
-    "id": "doc-008",
-    "name": "Dr. Ijeoma Nnaji",
-    "email": "ijeoma.nnaji@example.com",
-    "password": "hashed_password",
-    "phone": "+2348088888888",
-    "gender": "female",
-    "specialty": "Psychiatry",
-    "years_experience": 10,
-    "rating":4.5,
-    "consultation_fee": 17000,
-    "location": "Owerri",
-    "languages": ["English", "Igbo"],
-    "available_slots": [
-      { "start": "10:00", "end": "13:00", "day": "Wednesday" },
-      { "start": "15:00", "end": "18:00", "day": "Saturday" }
-    ],
-    "response_time_avg": 30,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Psychiatry",
-    "hospital_affiliation": "Imo State Specialist Hospital",
-    "recordIds": ["rec-108"],
-    "licenceNo": "MDCN/001008",
-    "verified": True
-  },
-
-  {
-    "id": "doc-009",
-    "name": "Dr. Ahmed Bello",
-    "email": "ahmed.bello@example.com",
-    "password": "hashed_password",
-    "phone": "+2348099999999",
-    "gender": "male",
-    "specialty": "Endocrinology",
-    "years_experience": 14,
-    "rating":4.5,
-    "consultation_fee": 23000,
-    "location": "Sokoto",
-    "languages": ["English", "Hausa"],
-    "available_slots": [
-      { "start": "08:00", "end": "11:00", "day": "Sunday" },
-      { "start": "14:00", "end": "17:00", "day": "Wednesday" }
-    ],
-    "response_time_avg": 16,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Endocrinology",
-    "hospital_affiliation": "Usmanu Danfodiyo Teaching Hospital",
-    "recordIds": ["rec-109"],
-    "licenceNo": "MDCN/001009",
-    "verified": True
-  },
-
-  {
-    "id": "doc-010",
-    "name": "Dr. Blessing Jonathan",
-    "email": "blessing.jonathan@example.com",
-    "password": "hashed_password",
-    "phone": "+2348101010101",
-    "rating":4.5,
-    "gender": "female",
-    "specialty": "Gynecology",
-    "years_experience": 6,
-    "consultation_fee": 14000,
-    "location": "Uyo",
-    "languages": ["English", "Ibibio"],
-    "available_slots": [
-      { "start": "09:30", "end": "12:30", "day": "Tuesday" },
-      { "start": "14:00", "end": "17:00", "day": "Friday" }
-    ],
-    "response_time_avg": 17,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "rating":4.5,
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Gynecology",
-    "hospital_affiliation": "University of Uyo Teaching Hospital",
-    "recordIds": ["rec-110"],
-    "licenceNo": "MDCN/001010",
-    "verified": True
-  },
-
-  {
-    "id": "doc-011",
-    "name": "Dr. Idris Mohammed",
-    "email": "idris.mohammed@example.com",
-    "password": "hashed_password",
-    "phone": "+2348111112121",
-    "gender": "male",
-    "specialty": "Internal Medicine",
-    "rating":4.5,
-    "years_experience": 9,
-    "consultation_fee": 16000,
-    "location": "Maiduguri",
-    "languages": ["English", "Hausa", "Kanuri"],
-    "available_slots": [
-      { "start": "08:30", "end": "11:30", "day": "Monday" },
-      { "start": "15:00", "end": "18:00", "day": "Thursday" }
-    ],
-    "response_time_avg": 14,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Internal Medicine",
-    "hospital_affiliation": "University of Maiduguri Teaching Hospital",
-    "recordIds": ["rec-111"],
-    "licenceNo": "MDCN/001011",
-    "verified": True
-  },
-
-  {
-    "id": "doc-012",
-    "name": "Dr. Sofia Hassan",
-    "email": "sofia.hassan@example.com",
-    "password": "hashed_password",
-    "phone": "+2348122223232",
-    "gender": "female",
-    "rating":4.5,
-    "specialty": "Radiology",
-    "years_experience": 5,
-    "consultation_fee": 13000,
-    "location": "Gombe",
-    "languages": ["English", "Hausa"],
-    "available_slots": [
-      { "start": "10:30", "end": "13:00", "day": "Wednesday" },
-      { "start": "14:30", "end": "17:30", "day": "Saturday" }
-    ],
-    "response_time_avg": 19,
-    "experience_level": "Junior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Radiology",
-    "hospital_affiliation": "Federal Teaching Hospital Gombe",
-    "recordIds": ["rec-112"],
-    "licenceNo": "MDCN/001012",
-    "verified": True
-  },
-
-  {
-    "id": "doc-013",
-    "name": "Dr. Henry Okafor",
-    "email": "henry.okafor@example.com",
-    "password": "hashed_password",
-    "phone": "+2348133334343",
-    "gender": "male",
-    "specialty": "Ophthalmology",
-    "years_experience": 16,
-    "rating":4.5,
-    "consultation_fee": 21000,
-    "location": "Asaba",
-    "languages": ["English", "Igbo"],
-    "available_slots": [
-      { "start": "08:00", "end": "12:00", "day": "Tuesday" },
-      { "start": "14:00", "end": "17:00", "day": "Friday" }
-    ],
-    "response_time_avg": 11,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Ophthalmology",
-    "hospital_affiliation": "Asaba Specialist Hospital",
-    "recordIds": ["rec-113"],
-    "licenceNo": "MDCN/001013",
-    "verified": True
-  },
-
-  {
-    "id": "doc-014",
-    "name": "Dr. Grace Ugwu",
-    "email": "grace.ugwu@example.com",
-    "password": "hashed_password",
-    "phone": "+2348144445454",
-    "gender": "female",
-    "specialty": "ENT Surgery",
-    "rating":4.5,
-    "years_experience": 7,
-    "consultation_fee": 15000,
-    "location": "Benin City",
-    "languages": ["English", "Edo"],
-    "available_slots": [
-      { "start": "09:00", "end": "12:00", "day": "Thursday" },
-      { "start": "14:00", "end": "17:00", "day": "Saturday" }
-    ],
-    "response_time_avg": 13,
-    "experience_level": "Mid-level",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "ENT",
-    "hospital_affiliation": "University of Benin Teaching Hospital",
-    "recordIds": ["rec-114"],
-    "licenceNo": "MDCN/001014",
-    "verified": True
-  },
-
-  {
-    "id": "doc-015",
-    "name": "Dr. Samuel Adegoke",
-    "email": "samuel.adegoke@example.com",
-    "password": "hashed_password",
-    "phone": "+2348155556565",
-    "gender": "male",
-    "specialty": "Urology",
-    "rating":4.5,
-    "years_experience": 18,
-    "consultation_fee": 26000,
-    "location": "Ilorin",
-    "languages": ["English", "Yoruba"],
-    "available_slots": [
-      { "start": "08:30", "end": "12:00", "day": "Monday" },
-      { "start": "15:00", "end": "19:00", "day": "Thursday" }
-    ],
-    "response_time_avg": 9,
-    "experience_level": "Senior",
-    "createdAt": "2025-12-01T10:31:44.580Z",
-    "updatedAt": "2025-12-01T10:31:44.580Z",
-    "lastLoginAt": "2025-12-01T10:31:44.580Z",
-    "role": "doctor",
-    "department": "Urology",
-    "hospital_affiliation": "University of Ilorin Teaching Hospital",
-    "recordIds": ["rec-115"],
-    "licenceNo": "MDCN/001015",
-    "verified": True
-  }
-]
-
 
 def get_closest_slot(available_slots):
     # Mapping Python weekdays: Monday=0 ... Sunday=6
@@ -868,7 +437,7 @@ def controller_node(state: AgentState) -> AgentState:
     if not state.get("active_node"):
         logger.info("Initializing new conversation")
         return {
-            "active_node": NodeType.HANDOFF.value, #NodeType.ORCHESTRATOR.value,
+            "active_node": NodeType.ORCHESTRATOR.value, #NodeType.ORCHESTRATOR.value,
         }
     
     return {"awaiting_user_input": False}
@@ -1191,7 +760,7 @@ def handoff_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
             if not selected_doctor:
                 selected_doctor = search_results[0]
             
-            confirmation_msg = f"Perfect! I'll connect you with **{selected_doctor['name']}** ({selected_doctor['specialty']}). They will receive your medical summary and contact you at: {get_closest_slot(selected_doctor['available_slots'])["start"] + ' on ' + get_closest_slot(selected_doctor['available_slots'])["day"]}.\n\n Is there anything else you'd like to know?"
+            confirmation_msg = f"Perfect! I'll connect you with **{selected_doctor['name']}** ({selected_doctor['specialty']}). They will receive your medical summary and contact you at: {get_closest_slot(selected_doctor['available_slots'])["start"] + ' on ' + get_closest_slot(selected_doctor['available_slots'])["day"]}.\n\n Is there anything else you'd like to know?" # pyright: ignore[reportOptionalSubscript]
             
             if language != "english":
                 confirmation_msg = client_manager.translate_text(confirmation_msg, "english", language)
@@ -1365,9 +934,9 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
     
     # Add nodes
     workflow.add_node("controller", controller_node)
-    workflow.add_node("orchestrator", lambda state: orchestrator_node(state, llm))
-    workflow.add_node("specialist", lambda state: specialist_node(state, llm))
-    workflow.add_node("clerking", lambda state: clerking_node(state, llm))
+    workflow.add_node("orchestrator", lambda state: orchestrator_node(state, llm)) # pyright: ignore[reportArgumentType]
+    workflow.add_node("specialist", lambda state: specialist_node(state, llm)) # pyright: ignore[reportArgumentType]
+    workflow.add_node("clerking", lambda state: clerking_node(state, llm)) # pyright: ignore[reportArgumentType]
     workflow.add_node("soap_generation", lambda state: soap_generation_node(state, llm))
     workflow.add_node("handoff", lambda state: handoff_node(state, llm))
     
@@ -1435,35 +1004,51 @@ def run_conversation_turn(
     # Initialize state if first interaction
     if state is None:
         state = {
-            "messages": [],
-            "active_node": None,
-            "handoff_summary": None,
-            "clerking_convo": "",
-            "soap_summary": None,
-            "doctor_preferences": {},
-            "matched_doctor": None,
-            "awaiting_user_input": False,
-            "conversation_ended": False,
-            "is_doctor_id": False,
-            "request_doctor_list": False,
-            "doctor_list": [],
-            "selected_doctor": "",
-            "language": "english"
-        }
+                "messages": [],
+                "active_node": None,
+                "handoff_summary": None,
+                "clerking_convo": "",
+                "soap_summary": None,
+                "doctor_preferences": {},
+                "matched_doctor": None,
+                "awaiting_user_input": False,
+                "conversation_ended": False,
+                "is_doctor_id": False,
+                "selected_doctor": "",
+                "language": "english"   }
+        
+    state["language"] = user_input.language.lower()
+    global_state["language"] = user_input.language.lower()
     
-    # Update state with user input
-    state["messages"].append(HumanMessage(content=user_input.message))
+    if user_input.audio != "":
+        audio_bytes = base64.b64decode(user_input.audio)
+        #with open(audio_path, "wb") as f:
+        #    f.write(audio_bytes)
+        
+        response = spitch_client.speech.transcribe(
+            language=state["language"][:2],
+            content=audio_bytes,
+            model="mansa_v1",
+            timestamp="sentence"
+        )
+        state["messages"].append(HumanMessage(content=response.text))
+        
+        logger.info(f"STT Response: {response.text}")
+    else:     
+        # Update state with user input
+        state["messages"].append(HumanMessage(content=user_input.message))
     
     #if user_input.isdoctorlist:
     #    state["doctor_list"] = user_input.doctor_list
     #    global_state["doctor_list"] = user_input.doctor_list
     
-    state["language"] = user_input.language.lower()
-    global_state["language"] = user_input.language.lower()
+    
     
     # Run graph
     try:
         result = graph.invoke(state)
+        
+        
         return result
     except Exception as e:
         logger.error(f"Error in graph execution: {e}")
@@ -1509,21 +1094,30 @@ async def handle_agent_interaction(user_input: UserMessage):
                 logger.info(f"Active node: {state.get('active_node')}, Language: {state.get('language')}")
                 
                 message = last_message.content
+
+                if user_input.audio != "":
+                    response = spitch_client.speech.generate(
+                    text= message,
+                    language= state["language"][:2],
+                    voice= client_manager.voice_dict[state["language"]],
+                    format="mp3"
+                    )
+                    base64_audio = base64.b64encode(response.read()).decode("utf-8")
+                else:
+                    base64_audio = ""
                 
                 # Determine response type
                 if state.get("is_doctor_id"):
                     state["is_doctor_id"] = False
                     return AgentResponse(
                         message=message,
-                        #doctorlist_request=False,
-                        isdoctorid=True,
+                        audio = base64_audio,
                         doctorid=state.get("selected_doctor", "")
                     )
                 else:
                     return AgentResponse(
                         message=message,
-                        doctorlist_request=False,
-                        isdoctorid=False,
+                        audio = base64_audio,
                         doctorid=""
                     )
         
@@ -1566,6 +1160,8 @@ async def startup_event():
     for node in NodeType:
         logger.info(f"  • {node.value}")
     logger.info("="*70)
+    
+
 
 #if __name__ == "__main__":
 #    import uvicorn
