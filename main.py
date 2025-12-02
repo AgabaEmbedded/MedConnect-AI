@@ -4,12 +4,17 @@ Refactored with improved architecture, error handling, and system prompts
 """
 
 import os
+import base64
+import requests
 from typing import TypedDict, Annotated, Optional, List, Dict, Any
 import json
 import operator
 from enum import Enum
 from openai import OpenAI
+from spitch import Spitch
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from doclist import dummy_doctors
 
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -21,6 +26,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import logging
 
+# pyright: reportReturnType=false
+# pyright: reportGeneralTypeIssues=false
+# pyright: reportOptionalMemberAccess=false
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -37,6 +45,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "medconnect-479308")
 RUNPOD_BASE_URL = os.getenv("RUNPOD_BASE_URL", "https://z8sgwy2614af6x-8000.proxy.runpod.net/v1")
+USERS_ENDPOINT = "https://medconnect-api-xrmi.onrender.com/api/agents"
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable is required")
@@ -90,8 +99,8 @@ class AgentState(TypedDict):
     awaiting_user_input: bool
     conversation_ended: bool
     is_doctor_id: bool
-    request_doctor_list: bool
-    doctor_list: List[DoctorInfo]
+    #request_doctor_list: bool
+    #doctor_list: List[DoctorInfo]
     selected_doctor: str
     language: str
 
@@ -100,16 +109,18 @@ class AgentState(TypedDict):
 # ============================================================================
 class UserMessage(BaseModel):
     """User input structure"""
-    message: str = Field(..., min_length=1, description="User's message")
-    isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
-    doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
+    audio: str = Field("", min_length=0, description = "Base64 encode audio file")
+    message: str = Field("", min_length=0, description="User's message")
+    #isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
+    #doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
     language: str = Field(default="english", description="User's preferred language")
 
 class AgentResponse(BaseModel):
     """Agent response structure"""
+    audio: str = Field("", min_length=0, description="base64 encoded audion")
     message: str = Field(..., description="Agent's response message")
-    doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
-    isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
+    #doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
+    #isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
     doctorid: str = Field(default="", description="Selected doctor ID")
 
 # ============================================================================
@@ -132,6 +143,12 @@ class ClientManager:
         self.translate_client: Optional[translate.TranslationServiceClient] = None
         self.parent = f"projects/{GOOGLE_PROJECT_ID}/locations/global"
         self._initialize_clients()
+        self.voice_dict = {
+            "english": "comfort",
+            "hausa": "zainab",
+            "yoruba": "sade",
+            "igbo": "amara"
+        }
     
     def _initialize_clients(self):
         """Initialize all external clients"""
@@ -151,6 +168,14 @@ class ClientManager:
             logger.info("Translation client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize translation client: {e}")
+
+        # Initialize spitch client
+        try:
+            self.spitch_client  = Spitch()
+            logger.info("Spitch client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize spitch client: {e}")
+
     
     def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate text between languages"""
@@ -208,6 +233,7 @@ class ClientManager:
 
 # Global client manager
 client_manager = ClientManager()
+spitch_client = Spitch()
 
 # ============================================================================
 # LLM INITIALIZATION
@@ -221,8 +247,50 @@ def initialize_llm(api_key: str) -> ChatGoogleGenerativeAI:
     )
 
 # ============================================================================
-# TOOL DEFINITIONS
+# TOOL  AND METHODS DEFINITIONS
 # ============================================================================
+
+def get_closest_slot(available_slots):
+    # Mapping Python weekdays: Monday=0 ... Sunday=6
+    weekday_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6
+    }
+
+    now = datetime.now()
+    closest = None
+    closest_dt = None
+
+    for slot in available_slots:
+        day_str = slot["day"].lower()
+        start_time_str = slot["start"]
+
+        # Parse time
+        hour, minute = map(int, start_time_str.split(":"))
+        slot_weekday = weekday_map[day_str]
+
+        # Compute the next date that matches this weekday
+        today_weekday = now.weekday()
+        days_ahead = slot_weekday - today_weekday
+
+        if days_ahead < 0:
+            days_ahead += 7  # next week
+
+        # Build full datetime
+        slot_date = now.date() + timedelta(days=days_ahead)
+        slot_dt = datetime(slot_date.year, slot_date.month, slot_date.day, hour, minute)
+
+        # If the slot is today but time has passed → move to next week
+        if slot_dt < now:
+            slot_dt += timedelta(days=7)
+
+        # Compare to find closest
+        if closest_dt is None or slot_dt < closest_dt:
+            closest_dt = slot_dt
+            closest = slot
+
+    return closest
+
 @tool
 def orchestrator_handoff(node_to_handoff: str, summary: str) -> Dict[str, str]:
     """
@@ -283,7 +351,7 @@ def doctor_search(
     location: str = "Any",
     max_price: float = 10000.0,
     experience_level: str = "any",
-    availability: str = "any",
+    urgent: str = "any",
     gender: str = "any"
 ) -> tuple[List[DoctorInfo], str]:
     """
@@ -301,24 +369,39 @@ def doctor_search(
         Tuple of (matching doctors list, message)
     """
     # Get doctor list from global state
-    doctor_list = global_state.get("doctor_list", [])
+    #doctor_list = global_state.get("doctor_list", [])
+    language = global_state.get("language", "english")
+    try:
+        response = requests.get(USERS_ENDPOINT)
+        response_data = response.json()
+        logger.info("doctor list fetched successfully")
+        doctor_list = [doc for doc in response_data if doc["verified"] and doc["role"]=="doctor" ]
+        logger.info(doctor_list)
+        doctor_list = dummy_doctors
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Unable to fetch doctor list: {e}")
+        doctor_list = []
     
     if not doctor_list:
-        logger.warning("No doctors available in database")
+        logger.warning("No verified doctors available in database")
         return [], "No doctors available at the moment."
     
     filtered = doctor_list.copy()
     criteria_met = 0
-    
+    today = datetime.today().strftime('%A')
+
     # Apply filters
     filters = [
+        ("urgency", lambda d: today.lower() in [available["day"].lower() for available in d["available_slots"]]),
         ("price", lambda d: d["consultation_fee"] <= max_price),
+        ("language", lambda d: language.lower() in [l.lower() for l in d["languages"]]),
         ("location", lambda d: location.lower() == "any" or location.lower() in d["location"].lower()),
         ("gender", lambda d: gender.lower() == "any" or d["gender"].lower() == gender.lower()),
         ("experience", lambda d: experience_level.lower() == "any" or d["experience_level"].lower() == experience_level.lower()),
     ]
     
-    for filter_name, filter_func in filters:
+    for filter_name, filter_func in filters[1:] if urgent else filters:
         temp_filtered = [d for d in filtered if filter_func(d)]
         if temp_filtered:
             filtered = temp_filtered
@@ -354,7 +437,7 @@ def controller_node(state: AgentState) -> AgentState:
     if not state.get("active_node"):
         logger.info("Initializing new conversation")
         return {
-            "active_node": NodeType.ORCHESTRATOR.value,
+            "active_node": NodeType.ORCHESTRATOR.value, #NodeType.ORCHESTRATOR.value,
         }
     
     return {"awaiting_user_input": False}
@@ -677,7 +760,7 @@ def handoff_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
             if not selected_doctor:
                 selected_doctor = search_results[0]
             
-            confirmation_msg = f"Perfect! I'll connect you with **{selected_doctor['name']}** ({selected_doctor['specialty']}). They will receive your medical summary and contact you at: {selected_doctor['available_slots'][0]}.\n\nIs there anything else you'd like to know?"
+            confirmation_msg = f"Perfect! I'll connect you with **{selected_doctor['name']}** ({selected_doctor['specialty']}). They will receive your medical summary and contact you at: {get_closest_slot(selected_doctor['available_slots'])["start"] + ' on ' + get_closest_slot(selected_doctor['available_slots'])["day"]}.\n\n Is there anything else you'd like to know?" # pyright: ignore[reportOptionalSubscript]
             
             if language != "english":
                 confirmation_msg = client_manager.translate_text(confirmation_msg, "english", language)
@@ -698,7 +781,8 @@ CORE RESPONSIBILITIES:
 • Help patients find the right doctor for their medical needs
 • Gather preferences systematically
 • Use doctor_search tool to find matching doctors
-• Present options clearly and professionally
+• Present options clearly and professionally in natural language
+• Don't insist on user to make entry, use default for requirements the user intentionally left empty
 
 CONVERSATION FLOW:
 
@@ -707,23 +791,30 @@ CONVERSATION FLOW:
 
 2. GATHER PREFERENCES (ask naturally, not as a form):
    - Specialty needed (infer from SOAP note if available)
-   - Preferred location
+   - Preferred location (state in Nigeria)
    - Budget/consultation fee range
    - Experience level preference (junior/mid-level/senior)
    - Gender preference (if any)
-   - Availability urgency
+   - urgent (if situation is urgent yes or no)
 
 3. SEARCH FOR DOCTORS
    Once you have key preferences, use doctor_search tool with:
    • specialty: Inferred from SOAP recommendations
    • location: User's preference (default "Any")
-   • max_price: Budget (default 10000)
+   • max_price: Budget (default 50000)
    • experience_level: Preference (default "any")
-   • availability: Urgency (default "any")
+   • urgent: Urgency (default False)
    • gender: Preference (default "any")
 
 4. PRESENT OPTIONS
    After search, present doctors clearly with all relevant details
+
+HOW TO COLLECT PREFERENCES
+• show user list of required preferences
+• Ask them to enter values for the ones that matters to them
+• Inform user to leave blank the one that does not matter
+• Use defualt values for preferences user left empty
+• Don't insist on user to make entry, use default for empty requirements
 
 IMPORTANT GUIDELINES:
 • Be patient and helpful
@@ -760,8 +851,8 @@ Remember: Your goal is finding the best match for the patient's needs and prefer
    💰 Consultation Fee: ₦{doc['consultation_fee']:,}
    📍 Location: {doc['location']}
    🗣️ Languages: {', '.join(doc['languages'])}
-   ⏰ Available: {', '.join(doc['available_slots'][:3])}
-   ⚡ Avg Response Time: {doc['response_time_avg']}
+   ⏰ Available: {', '.join([available["day"] + " " + available["start"] for available in doc['available_slots']])}
+   ⚡ Avg Response Time: {doc['response_time_avg']} minutes
 
 """
             
@@ -780,7 +871,7 @@ Remember: Your goal is finding the best match for the patient's needs and prefer
                 "awaiting_user_input": True
             }
         else:
-            no_match_msg = "I couldn't find doctors matching those exact criteria. Could you adjust your preferences? For example, try a different location, higher budget, or broader specialty?"
+            no_match_msg = "I couldn't find doctors matching those exact criteria. Could you adjust your preferences? For example, try a different location or higher budget?"
             
             if language != "english":
                 no_match_msg = client_manager.translate_text(no_match_msg, "english", language)
@@ -843,9 +934,9 @@ def create_medical_assistant_graph(api_key: str) -> StateGraph:
     
     # Add nodes
     workflow.add_node("controller", controller_node)
-    workflow.add_node("orchestrator", lambda state: orchestrator_node(state, llm))
-    workflow.add_node("specialist", lambda state: specialist_node(state, llm))
-    workflow.add_node("clerking", lambda state: clerking_node(state, llm))
+    workflow.add_node("orchestrator", lambda state: orchestrator_node(state, llm)) # pyright: ignore[reportArgumentType]
+    workflow.add_node("specialist", lambda state: specialist_node(state, llm)) # pyright: ignore[reportArgumentType]
+    workflow.add_node("clerking", lambda state: clerking_node(state, llm)) # pyright: ignore[reportArgumentType]
     workflow.add_node("soap_generation", lambda state: soap_generation_node(state, llm))
     workflow.add_node("handoff", lambda state: handoff_node(state, llm))
     
@@ -913,34 +1004,51 @@ def run_conversation_turn(
     # Initialize state if first interaction
     if state is None:
         state = {
-            "messages": [],
-            "active_node": None,
-            "handoff_summary": None,
-            "clerking_convo": "",
-            "soap_summary": None,
-            "doctor_preferences": {},
-            "matched_doctor": None,
-            "awaiting_user_input": False,
-            "conversation_ended": False,
-            "is_doctor_id": False,
-            "request_doctor_list": False,
-            "doctor_list": [],
-            "selected_doctor": "",
-            "language": "english"
-        }
-    
-    # Update state with user input
-    state["messages"].append(HumanMessage(content=user_input.message))
-    
-    if user_input.isdoctorlist:
-        state["doctor_list"] = user_input.doctor_list
-        global_state["doctor_list"] = user_input.doctor_list
-    
+                "messages": [],
+                "active_node": None,
+                "handoff_summary": None,
+                "clerking_convo": "",
+                "soap_summary": None,
+                "doctor_preferences": {},
+                "matched_doctor": None,
+                "awaiting_user_input": False,
+                "conversation_ended": False,
+                "is_doctor_id": False,
+                "selected_doctor": "",
+                "language": "english"   }
+        
     state["language"] = user_input.language.lower()
+    global_state["language"] = user_input.language.lower()
+    
+    if user_input.audio != "":
+        audio_bytes = base64.b64decode(user_input.audio)
+        #with open(audio_path, "wb") as f:
+        #    f.write(audio_bytes)
+        
+        response = spitch_client.speech.transcribe(
+            language=state["language"][:2],
+            content=audio_bytes,
+            model="mansa_v1",
+            timestamp="sentence"
+        )
+        state["messages"].append(HumanMessage(content=response.text))
+        
+        logger.info(f"STT Response: {response.text}")
+    else:     
+        # Update state with user input
+        state["messages"].append(HumanMessage(content=user_input.message))
+    
+    #if user_input.isdoctorlist:
+    #    state["doctor_list"] = user_input.doctor_list
+    #    global_state["doctor_list"] = user_input.doctor_list
+    
+    
     
     # Run graph
     try:
         result = graph.invoke(state)
+        
+        
         return result
     except Exception as e:
         logger.error(f"Error in graph execution: {e}")
@@ -986,29 +1094,30 @@ async def handle_agent_interaction(user_input: UserMessage):
                 logger.info(f"Active node: {state.get('active_node')}, Language: {state.get('language')}")
                 
                 message = last_message.content
+
+                if user_input.audio != "":
+                    response = spitch_client.speech.generate(
+                    text= message,
+                    language= state["language"][:2],
+                    voice= client_manager.voice_dict[state["language"]],
+                    format="mp3"
+                    )
+                    base64_audio = base64.b64encode(response.read()).decode("utf-8")
+                else:
+                    base64_audio = ""
                 
                 # Determine response type
-                if state.get("request_doctor_list"):
-                    state["request_doctor_list"] = False
-                    return AgentResponse(
-                        message=message,
-                        doctorlist_request=True,
-                        isdoctorid=False,
-                        doctorid=""
-                    )
-                elif state.get("is_doctor_id"):
+                if state.get("is_doctor_id"):
                     state["is_doctor_id"] = False
                     return AgentResponse(
                         message=message,
-                        doctorlist_request=False,
-                        isdoctorid=True,
+                        audio = base64_audio,
                         doctorid=state.get("selected_doctor", "")
                     )
                 else:
                     return AgentResponse(
                         message=message,
-                        doctorlist_request=False,
-                        isdoctorid=False,
+                        audio = base64_audio,
                         doctorid=""
                     )
         
@@ -1051,6 +1160,8 @@ async def startup_event():
     for node in NodeType:
         logger.info(f"  • {node.value}")
     logger.info("="*70)
+    
+
 
 #if __name__ == "__main__":
 #    import uvicorn

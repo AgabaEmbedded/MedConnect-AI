@@ -1,112 +1,124 @@
 import requests
 import json
-
-# The server URL and endpoint path
+import base64
+import pyaudio
+import webrtcvad
+import wave
+import time
 
 API_URL = "http://127.0.0.1:8000/conversation"
-#API_URL = "https://medconnect-ai-4fnj.onrender.com/conversation"
 
-mock_doctors = [
-        {
-            "id": "DOC001",
-            "name": "Dr. Sarah Johnson",
-            "specialty": "General Practitioner",
-            "rating": 4.8,
-            "years_experience": 12,
-            "consultation_fee": 75,
-            "location": "Lagos, Nigeria",
-            "languages": ["English", "Yoruba"],
-            "available_slots": ["Today 2PM", "Today 5PM", "Tomorrow 9AM"],
-            "response_time_avg": "15 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC002",
-            "name": "Dr. Michael Okonkwo",
-            "specialty": "Internal Medicine",
-            "rating": 4.9,
-            "years_experience": 15,
-            "consultation_fee": 100,
-            "location": "Abuja, Nigeria",
-            "languages": ["English", "Igbo"],
-            "available_slots": ["Today 3PM", "Tomorrow 10AM"],
-            "response_time_avg": "10 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC003",
-            "name": "Dr. Amina Bello",
-            "specialty": "Pediatrics",
-            "rating": 4.7,
-            "years_experience": 8,
-            "consultation_fee": 80,
-            "location": "Kano, Nigeria",
-            "languages": ["English", "Hausa"],
-            "available_slots": ["Tomorrow 11AM", "Tomorrow 2PM"],
-            "response_time_avg": "20 minutes",
-            "experience_level": "mid-level"
-        },
-        {
-            "id": "DOC004",
-            "name": "Dr. James Adebayo",
-            "specialty": "Cardiology",
-            "rating": 4.9,
-            "years_experience": 20,
-            "consultation_fee": 150,
-            "location": "Lagos, Nigeria",
-            "languages": ["English"],
-            "available_slots": ["Today 4PM", "Tomorrow 9AM"],
-            "response_time_avg": "5 minutes",
-            "experience_level": "senior"
-        },
-        {
-            "id": "DOC005",
-            "name": "Dr. Fatima Mohammed",
-            "specialty": "General Practitioner",
-            "rating": 4.6,
-            "years_experience": 5,
-            "consultation_fee": 50,
-            "location": "Kano, Nigeria",
-            "languages": ["English", "Hausa", "Arabic"],
-            "available_slots": ["Today 1PM", "Today 3PM", "Tomorrow 10AM"],
-            "response_time_avg": "25 minutes",
-            "experience_level": "junior"
-        }
-    ]
-# The data payload (matching the UserMessage model)
-language = input("Enter the Language of choice[english, hausa, igbo, yoruba]: ")
-response_data = {"doctorlist_request" : False}
+# --- Audio Settings ---
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+FRAME_DURATION = 30  # ms (10/20/30 allowed)
+FRAME_SIZE = int(RATE * FRAME_DURATION / 1000)
+SILENCE_LIMIT = 1.0  # seconds
+
+
+vad = webrtcvad.Vad(2)
+pa = pyaudio.PyAudio()
+
+stream = pa.open(
+    format=FORMAT,
+    channels=CHANNELS,
+    rate=RATE,
+    input=True,
+    frames_per_buffer=FRAME_SIZE
+)
+
+
+def record_audio():
+    print("\n🎤 Recording... Speak now.")
+
+    frames = []
+    silence_counter = 0
+    max_silence_frames = int(SILENCE_LIMIT * 1000 / FRAME_DURATION)
+
+    try:
+        while True:
+            data = stream.read(FRAME_SIZE, exception_on_overflow=False)
+            is_speech = vad.is_speech(data, RATE)
+
+            if is_speech:
+                frames.append(data)
+                silence_counter = 0
+            else:
+                silence_counter += 1
+                if frames:
+                    frames.append(data)  # keep small trailing silence
+
+            if silence_counter > max_silence_frames and frames:
+                break
+
+    except KeyboardInterrupt:
+        print("Stopped manually.")
+
+    print("📁 Saving audio to output.wav")
+
+    # Save WAV properly
+    output_file = "audio_file.wav"
+    wf = wave.open(output_file, "wb")
+    wf.setnchannels(CHANNELS)
+    wf.setsampwidth(pa.get_sample_size(FORMAT))
+    wf.setframerate(RATE)
+    wf.writeframes(b"".join(frames))
+    wf.close()
+
+    print("✔ Saved:", output_file)
+
+    # Encode to base64
+    with open(output_file, "rb") as file:
+        audio_b64 = base64.b64encode(file.read()).decode("utf-8")
+
+    return audio_b64
+
+
+# ---- Conversation Loop ----
+
+language = input("Enter language [english, hausa, igbo, yoruba]: ").strip()
+
 while True:
-    # Making the POST request
-    user_entry = input("\n👤 YOU: ")
-    if response_data["doctorlist_request"]:
-                  
-        payload =  {
-        "message": user_entry,
-        "isdoctorlist": True,
-        "doctor_list": mock_doctors,
-        "language": language
+    choice = input("\nUse Audio or Text? (a/t): ").strip().lower()
+
+    if choice == "t":
+        user_text = input("\n👤 YOU: ")
+        payload = {
+            "message": user_text,
+            "language": language,
+            "audio": ""
         }
-        print(f"\n{'*'*60}")
-        print("doctor list sent")
-        print(f"{'*'*60}")
-    
+
+    elif choice == "a":
+        audio_b64 = record_audio()
+        payload = {
+            "message": "",
+            "language": language,
+            "audio": audio_b64
+        }
+
     else:
-         payload =  {
-            "message": user_entry,
-            "isdoctorlist": False,
-            "doctor_list": [{} ],
-            "language": language
-            }
+        print("❌ Invalid choice")
+        continue
+
     try:
         response = requests.post(API_URL, json=payload)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-        
-        # The response body (matching the AgentResponse model)
-        response_data = response.json()
-        
-        #print("\n--- Extracted Greeting ---")
-        print(f"\n🤖 ASSISTANT: {response_data.get('message')}")
+        response.raise_for_status()
 
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
+        data = response.json()
+
+        # Handle audio response
+        if data.get("audio"):
+            with open("response.wav", "wb") as f:
+                f.write(base64.b64decode(data["audio"]))
+            print("🎧 Assistant audio saved as response.wav")
+
+        # Handle message + doctor id safely
+        msg = data.get("message", "")
+        doctor = data.get("doctorid", "")
+
+        print(f"\n🤖 ASSISTANT: {msg}{doctor}")
+
+    except Exception as e:
+        print("❌ Error:", e)
