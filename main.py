@@ -1028,7 +1028,7 @@ def run_conversation_turn(
         response = spitch_client.speech.transcribe(
             language=state["language"][:2],
             content=audio_bytes,
-            model="mansa_v1",
+            model="legacy",
             timestamp="sentence"
         )
         state["messages"].append(HumanMessage(content=response.text))
