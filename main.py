@@ -109,8 +109,8 @@ class AgentState(TypedDict):
 # ============================================================================
 class UserMessage(BaseModel):
     """User input structure"""
+    audio: str = Field("", min_length=0, description = "Base64 encode audio file")
     message: str = Field("", min_length=0, description="User's message")
-    audio_mode: bool = Field(False, description="if you require audio")
     #isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
     #doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
     language: str = Field(default="english", description="User's preferred language")
@@ -122,15 +122,7 @@ class AgentResponse(BaseModel):
     #doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
     #isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
     doctorid: str = Field(default="", description="Selected doctor ID")
-
-class TranscribeUserMessage(BaseModel):
-    """User input structure"""
-    audio: str = Field("", min_length=1, description = "Base64 encode audio file")
-    language: str = Field(default="english", description="language of audio")
-
-class TranscribeAgentResponse(BaseModel):
-    """Agent response structure"""
-    message: str = Field("", description="Agent's response message")
+    medical_summary: str = Field("", min_length=0, description="Patient's collected medical summary")
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -1029,11 +1021,29 @@ def run_conversation_turn(
     state["language"] = user_input.language.lower()
     global_state["language"] = user_input.language.lower()
     
+    if user_input.audio != "":
+        audio_bytes = base64.b64decode(user_input.audio)
+        #with open(audio_path, "wb") as f:
+        #    f.write(audio_bytes)
+        
+        response = spitch_client.speech.transcribe(
+            language=state["language"][:2],
+            content=audio_bytes,
+            model="legacy",
+            timestamp="sentence"
+        )
+        state["messages"].append(HumanMessage(content=response.text))
+        
+        logger.info(f"STT Response: {response.text}")
+    else:     
+        # Update state with user input
+        state["messages"].append(HumanMessage(content=user_input.message))
     
-       
-    # Update state with user input
-    state["messages"].append(HumanMessage(content=user_input.message))
-       
+    #if user_input.isdoctorlist:
+    #    state["doctor_list"] = user_input.doctor_list
+    #    global_state["doctor_list"] = user_input.doctor_list
+    
+    
     
     # Run graph
     try:
@@ -1086,7 +1096,7 @@ async def handle_agent_interaction(user_input: UserMessage):
                 
                 message = last_message.content
 
-                if user_input.audio_mode:
+                if user_input.audio != "":
                     response = spitch_client.speech.generate(
                     text= message,
                     language= state["language"][:2],
@@ -1103,13 +1113,16 @@ async def handle_agent_interaction(user_input: UserMessage):
                     return AgentResponse(
                         message=message,
                         audio = base64_audio,
-                        doctorid=state.get("selected_doctor", "")
+                        doctorid=state.get("selected_doctor", ""),
+                        medical_summary = state.get("soap_summary", "")
+                        
                     )
                 else:
                     return AgentResponse(
                         message=message,
                         audio = base64_audio,
-                        doctorid=""
+                        doctorid="",
+                        medical_summary = ""
                     )
         
         raise HTTPException(status_code=500, detail="No response generated")
@@ -1117,19 +1130,6 @@ async def handle_agent_interaction(user_input: UserMessage):
     except Exception as e:
         logger.error(f"Error handling conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
-@app.post("/transcribe", response_model= TranscribeUserMessage)
-async def transcribe_audio(user_input: TranscribeUserMessage):
-    audio_bytes = base64.b64decode(user_input.audio)
-        
-    response = spitch_client.speech.transcribe(
-        language=user_input.language[:2],
-        content=audio_bytes,
-        model="legacy",
-        timestamp="sentence"
-    )
-    
-    return {"audio": response.text}
 
 @app.get("/health")
 async def health_check():
