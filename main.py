@@ -1121,7 +1121,8 @@ async def handle_agent_interaction(user_input: UserMessage):
                     return AgentResponse(
                         message=message,
                         audio = base64_audio,
-                        doctorid=""
+                        doctorid="",
+                        medical_summary = ""
                     )
         
         raise HTTPException(status_code=500, detail="No response generated")
