@@ -122,6 +122,7 @@ class AgentResponse(BaseModel):
     #doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
     #isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
     doctorid: str = Field(default="", description="Selected doctor ID")
+    medical_summary: str = Field("", min_length=0, description="Patient's collected medical summary")
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -1112,7 +1113,9 @@ async def handle_agent_interaction(user_input: UserMessage):
                     return AgentResponse(
                         message=message,
                         audio = base64_audio,
-                        doctorid=state.get("selected_doctor", "")
+                        doctorid=state.get("selected_doctor", ""),
+                        medical_summary = state.get("soap_summary", "")
+                        
                     )
                 else:
                     return AgentResponse(
