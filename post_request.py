@@ -6,7 +6,8 @@ import webrtcvad
 import wave
 import time
 
-API_URL = "http://127.0.0.1:8000/conversation"
+#API_URL = "http://127.0.0.1:8000/conversation"
+API_URL = "https://medconnect-ai-4fnj.onrender.com/conversation"
 
 # --- Audio Settings ---
 FORMAT = pyaudio.paInt16

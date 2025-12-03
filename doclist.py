@@ -450,4 +450,3 @@ dummy_doctors = [
     "verified": True
   }
 ]
-
