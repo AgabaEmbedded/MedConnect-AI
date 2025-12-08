@@ -6,8 +6,8 @@ import webrtcvad
 import wave
 import time
 
-#API_URL = "http://127.0.0.1:8000/conversation"
-API_URL = "https://medconnect-ai-4fnj.onrender.com/conversation"
+API_URL = "http://127.0.0.1:8000/conversation"
+#API_URL = "https://medconnect-ai-4fnj.onrender.com/conversation"
 
 # --- Audio Settings ---
 FORMAT = pyaudio.paInt16
@@ -88,7 +88,8 @@ while True:
         payload = {
             "message": user_text,
             "language": language,
-            "audio": ""
+            "audio": "",
+            "premium": True
         }
 
     elif choice == "a":
@@ -96,7 +97,8 @@ while True:
         payload = {
             "message": "",
             "language": language,
-            "audio": audio_b64
+            "audio": audio_b64,
+            "premium": False
         }
 
     else:

@@ -103,6 +103,7 @@ class AgentState(TypedDict):
     #doctor_list: List[DoctorInfo]
     selected_doctor: str
     language: str
+    premium: bool
 
 # ============================================================================
 # API MODELS
@@ -111,18 +112,15 @@ class UserMessage(BaseModel):
     """User input structure"""
     audio: str = Field("", min_length=0, description = "Base64 encode audio file")
     message: str = Field("", min_length=0, description="User's message")
-    #isdoctorlist: bool = Field(default=False, description="Whether message contains doctor list")
-    #doctor_list: List[Dict[str, Any]] = Field(default_factory=list, description="List of available doctors")
+    premium: bool = Field(default=False, description="Whether user is a premium user")
     language: str = Field(default="english", description="User's preferred language")
 
 class AgentResponse(BaseModel):
     """Agent response structure"""
     audio: str = Field("", min_length=0, description="base64 encoded audion")
     message: str = Field(..., description="Agent's response message")
-    #doctorlist_request: bool = Field(default=False, description="Whether requesting doctor list")
-    #isdoctorid: bool = Field(default=False, description="Whether returning doctor ID")
     doctorid: str = Field(default="", description="Selected doctor ID")
-    medical_summary: str = Field("", min_length=0, description="Patient's collected medical summary")
+    medical_summary: str = Field(default = "", min_length=0, description="Patient's collected medical summary")
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -242,7 +240,7 @@ spitch_client = Spitch()
 def initialize_llm(api_key: str) -> ChatGoogleGenerativeAI:
     """Initialize Gemini model"""
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-2.5-flash-lite",
         google_api_key=api_key,
         temperature=0.7
     )
@@ -350,7 +348,7 @@ def clerking_handoff(node_to_handoff: str, summary: str) -> Dict[str, str]:
 def doctor_search(
     specialty: str,
     location: str = "Any",
-    max_price: float = 10000.0,
+    max_price: float = 20000.0,
     experience_level: str = "any",
     urgent: str = "any",
     gender: str = "any"
@@ -372,21 +370,23 @@ def doctor_search(
     # Get doctor list from global state
     #doctor_list = global_state.get("doctor_list", [])
     language = global_state.get("language", "english")
-    try:
-        response = requests.get(USERS_ENDPOINT)
-        response_data = response.json()
-        logger.info("doctor list fetched successfully")
-        doctor_list = [doc for doc in response_data if doc["verified"] and doc["role"]=="doctor" ]
-        logger.info(doctor_list)
-        doctor_list = dummy_doctors
+    #try:
+    #    response = requests.get(USERS_ENDPOINT)
+    #    response_data = response.json()
+    #    logger.info("doctor list fetched successfully")
+    #    doctor_list = [doc for doc in response_data if doc["verified"] and doc["role"]=="doctor" ]
+    #    logger.info(doctor_list)
+    #    doctor_list = dummy_doctors
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Unable to fetch doctor list: {e}")
-        doctor_list = []
-    
+    #except requests.exceptions.RequestException as e:
+    #    logger.error(f"Unable to fetch doctor list: {e}")
+    #    doctor_list = []
+    doctor_list = dummy_doctors
+    doctor_list = [doc for doc in doctor_list if doc["verified"]]
     if not doctor_list:
         logger.warning("No verified doctors available in database")
         return [], "No doctors available at the moment."
+    
     
     filtered = doctor_list.copy()
     criteria_met = 0
@@ -402,12 +402,6 @@ def doctor_search(
         ("experience", lambda d: experience_level.lower() == "any" or d["experience_level"].lower() == experience_level.lower()),
     ]
     
-    for filter_name, filter_func in filters[1:] if urgent else filters:
-        temp_filtered = [d for d in filtered if filter_func(d)]
-        if temp_filtered:
-            filtered = temp_filtered
-            criteria_met += 1
-    
     # Filter by specialty
     specialty_filtered = [d for d in filtered if specialty.lower() in d["specialty"].lower()]
     if specialty_filtered:
@@ -418,12 +412,20 @@ def doctor_search(
         gp_filtered = [d for d in filtered if "general" in d["specialty"].lower()]
         if gp_filtered:
             filtered = gp_filtered
+
+    for filter_name, filter_func in filters[1:] if urgent else filters:
+        temp_filtered = [d for d in filtered if filter_func(d)]
+        if temp_filtered:
+            filtered = temp_filtered
+            criteria_met += 1
+    
+    
     
     # Sort by rating and experience
     filtered.sort(key=lambda x: (-x["rating"], -x["years_experience"], x["consultation_fee"]))
     
     # Determine message based on criteria met
-    message = "" if criteria_met >= 4 else "Your perfect match wasn't found, but these doctors closely match your preferences:\n\n"
+    message = "" if criteria_met >= 6 else "Your perfect match wasn't found, but these doctors closely match your preferences:\n\n"
     
     return filtered[:5], message
 
@@ -487,13 +489,20 @@ Remember: Questions about medical topics = specialist | Personal health complain
     response = llm_with_tools.invoke(messages)
     
     if response.tool_calls:
+        
         tool_call = response.tool_calls[0]
         handoff_result = orchestrator_handoff.invoke(tool_call["args"])
         
-        return {
-            "active_node": handoff_result["active_node"],
-            "awaiting_user_input": False
-        }
+        if not state["premium"]:
+            return {
+                "active_node": handoff_result["active_node"],
+                "awaiting_user_input": False
+            }
+        else:
+            return {
+                "active_node": "specialist",
+                "awaiting_user_input": False
+            }
 
     return {
         "messages": [AIMessage(content=client_manager.extract_text(response.content))],
@@ -537,32 +546,52 @@ GUIDELINES:
             medical_response = client_manager.translate_text(medical_response, "english", language)
     
     # Fallback to Gemini if medical model unavailable
-    if True:#not medical_response:
-        system_prompt = f"""You are an expert medical specialist communicating in {language}.
+    if state["premium"] or not medical_response:
+        if state["premium"]:
 
-CORE RESPONSIBILITIES:
-• Answer medical questions with accurate, evidence-based information
-• Explain conditions, medications, and treatments clearly
-• Detect when questions become personal health complaints
+            system_prompt = f"""You are an expert medical specialist communicating in {language}.
 
-QUESTION vs COMPLAINT:
-• Question: "What causes migraines?" "How does insulin work?" "What is hypertension?"
-• Complaint: "I have a migraine" "My blood sugar is high" "My pressure is elevated"
+            CORE RESPONSIBILITIES:
+            • Answer medical questions with accurate, evidence-based information
+            • Explain conditions, medications, and treatments clearly
+            • Detect when questions become personal health complaints
 
-HANDOFF RULE:
-Use specialist_handoff to route to "clerking" when:
-• Patient describes personal symptoms
-• Patient asks what to do about their own symptoms
-• Conversation shifts from general info to personal health concerns
+            QUESTION vs COMPLAINT:
+            • Question: "What causes migraines?" "How does insulin work?" "What is hypertension?"
+            • Complaint: "I have a migraine" "My blood sugar is high" "My pressure is elevated"
 
-RESPONSE GUIDELINES:
-• Be thorough but concise
-• Use plain language
-• Always disclaim: "This is general information, not personal medical advice"
-• Be empathetic and supportive
-• If uncertain, recommend professional consultation
+            HANDOFF RULE:
+            Use specialist_handoff to route to "clerking" when:
+            • Patient describes personal symptoms
+            • Patient asks what to do about their own symptoms
+            • Conversation shifts from general info to personal health concerns
 
-Remember: Answer questions, don't diagnose. Personal symptoms require clerking."""
+            RESPONSE GUIDELINES:
+            • Be thorough but concise
+            • Use plain language
+            • Always disclaim: "This is general information, not personal medical advice"
+            • Be empathetic and supportive
+            • If uncertain, recommend professional consultation
+
+            Remember: Answer questions, don't diagnose. Personal symptoms require clerking."""
+        else:
+            system_prompt = f"""You are an expert medical specialist communicating in {language}.
+
+            CORE RESPONSIBILITIES:
+            • Answer medical questions with accurate, evidence-based information
+            • Explain conditions, medications, and treatments clearly
+            • Make no direct prescription or diagnosis or presciptions, only give medical tips
+
+
+            RESPONSE GUIDELINES:
+            • Be thorough but concise
+            • Use plain language
+            • Always disclaim: "This is general information, not personal medical advice"
+            • Be empathetic and supportive
+            • If uncertain, recommend professional consultation
+
+            Remember: Answer questions, don't diagnose and call no tool."""
+    
 
         messages = [SystemMessage(content=system_prompt)]
         messages.extend(state["messages"][-10:])
@@ -570,7 +599,7 @@ Remember: Answer questions, don't diagnose. Personal symptoms require clerking."
         llm_with_tools = llm.bind_tools([specialist_handoff])
         response = llm_with_tools.invoke(messages)
         
-        if response.tool_calls:
+        if response.tool_calls and state["premium"]:
             tool_call = response.tool_calls[0]
             handoff_result = specialist_handoff.invoke(tool_call["args"])
             
@@ -1019,8 +1048,11 @@ def run_conversation_turn(
                 "language": "english"   }
         
     state["language"] = user_input.language.lower()
+    state["premium"] = user_input.premium
     global_state["language"] = user_input.language.lower()
     
+
+    logger.info(f"ACTIVE LANGUAGE: {state['language']}")
     if user_input.audio != "":
         audio_bytes = base64.b64decode(user_input.audio)
         #with open(audio_path, "wb") as f:
@@ -1084,7 +1116,7 @@ async def handle_agent_interaction(user_input: UserMessage):
         
         # Store updated state
         conversation_states["default"] = state
-        
+        logger.info(f"ACTIVE LANGUAGE FOR TTS: {state['language']}")
         # Extract response
         if state["messages"]:
             last_message = state["messages"][-1]
@@ -1149,6 +1181,7 @@ async def reset_conversation():
     conversation_states.clear()
     logger.info("Conversation state reset")
     return {"status": "reset successful"}
+
 
 # ============================================================================
 # STARTUP
