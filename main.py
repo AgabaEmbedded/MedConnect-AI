@@ -440,7 +440,7 @@ def controller_node(state: AgentState) -> AgentState:
     if not state.get("active_node"):
         logger.info("Initializing new conversation")
         return {
-            "active_node": NodeType.HANDOFF.value, #NodeType.ORCHESTRATOR.value,
+            "active_node": NodeType.ORCHESTRATOR.value, #NodeType.ORCHESTRATOR.value,
         }
     
     return {"awaiting_user_input": False}
@@ -1051,6 +1051,8 @@ def run_conversation_turn(
     state["premium"] = user_input.premium
     global_state["language"] = user_input.language.lower()
     
+
+    logger.info(f"ACTIVE LANGUAGE: {state['language']}")
     if user_input.audio != "":
         audio_bytes = base64.b64decode(user_input.audio)
         #with open(audio_path, "wb") as f:
@@ -1114,7 +1116,7 @@ async def handle_agent_interaction(user_input: UserMessage):
         
         # Store updated state
         conversation_states["default"] = state
-        
+        logger.info(f"ACTIVE LANGUAGE FOR TTS: {state['language']}")
         # Extract response
         if state["messages"]:
             last_message = state["messages"][-1]
