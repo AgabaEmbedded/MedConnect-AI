@@ -1,4 +1,3 @@
-```markdown
 # MedConnect AI - Remote Medical Assistant
 
 **A Multi-Agent AI System for Intelligent Patient Triage, Medical History Collection, and Doctor Matching**
@@ -30,7 +29,7 @@ Designed for integration into medical freelance platforms like MedConnect, this 
 
 ## System Architecture
 
-```mermaid
+
 graph TD
     A[User Input<br/>(Text/Audio)] --> B(Controller)
     B --> C(Orchestrator<br/>Receptionist)
