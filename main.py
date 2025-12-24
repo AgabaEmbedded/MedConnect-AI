@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "medconnect-479308")
-RUNPOD_BASE_URL = os.getenv("RUNPOD_BASE_URL", "https://z8sgwy2614af6x-8000.proxy.runpod.net/v1")
+RUNPOD_BASE_URL = os.getenv("RUNPOD_BASE_URL", "https://0br7mnhp94yl8x-8000.proxy.runpod.net/v1")
 USERS_ENDPOINT = "https://medconnect-api-xrmi.onrender.com/api/agents"
 
 if not GEMINI_API_KEY:
@@ -120,7 +120,18 @@ class AgentResponse(BaseModel):
     audio: str = Field("", min_length=0, description="base64 encoded audion")
     message: str = Field(..., description="Agent's response message")
     doctorid: str = Field(default="", description="Selected doctor ID")
-    medical_summary: str = Field("", min_length=0, description="Patient's collected medical summary")
+    medical_summary: str = Field(default = "", min_length=0, description="Patient's collected medical summary")
+
+class TranslateMessage(BaseModel):
+    """User input structure"""
+    message: str = Field("", min_length=0, description="message to translate")
+    source_language: str = Field("", min_length=0, description = "source language")
+    target_language: str = Field(default="english", description="target language")
+
+class TranslateResponse(BaseModel):
+    """Agent response structure"""
+    message: str = Field(default="", description="Agent's response message")
+    
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -203,7 +214,7 @@ class ClientManager:
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="Agaba-Embedded4/MedConnectAI-FineTunned-4bit",
+                model="Agaba-Embedded4/MedConnectAI_Merged",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}
@@ -240,7 +251,7 @@ spitch_client = Spitch()
 def initialize_llm(api_key: str) -> ChatGoogleGenerativeAI:
     """Initialize Gemini model"""
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-2.5-flash-lite",
         google_api_key=api_key,
         temperature=0.7
     )
@@ -425,7 +436,7 @@ def doctor_search(
     filtered.sort(key=lambda x: (-x["rating"], -x["years_experience"], x["consultation_fee"]))
     
     # Determine message based on criteria met
-    message = "" if criteria_met >= 4 else "Your perfect match wasn't found, but these doctors closely match your preferences:\n\n"
+    message = "" if criteria_met >= 6 else "Your perfect match wasn't found, but these doctors closely match your preferences:\n\n"
     
     return filtered[:5], message
 
@@ -1036,7 +1047,7 @@ def run_conversation_turn(
         state = {
                 "messages": [],
                 "active_node": None,
-                "handoff_summary": None,
+                "handoff_summary": "",
                 "clerking_convo": "",
                 "soap_summary": None,
                 "doctor_preferences": {},
@@ -1162,6 +1173,12 @@ async def handle_agent_interaction(user_input: UserMessage):
     except Exception as e:
         logger.error(f"Error handling conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/translation")
+async def translate(user_input: TranslateMessage) -> TranslateResponse:
+     translation = client_manager.translate_text(user_input.message, user_input.source_language, user_input.target_language)
+     return {translation}
+
 
 @app.get("/health")
 async def health_check():
