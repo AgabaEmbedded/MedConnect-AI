@@ -29,7 +29,7 @@ Designed for integration into medical freelance platforms like MedConnect, this 
 
 ## System Architecture
 
-
+```mermaid
 graph TD
     A[User Input<br/>(Text/Audio)] --> B(Controller)
     B --> C(Orchestrator<br/>Receptionist)
