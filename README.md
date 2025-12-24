@@ -4,7 +4,7 @@
 **A Multi-Agent AI System for Intelligent Patient Triage, Medical History Collection, and Doctor Matching**
 
 <p align="center">
-  <a href="https://medconnect.streamlit.app/">
+  <a href="https://medconnect-ai.streamlit.app/">
     <img src="Demo.png" width="100" />
   </a>
 </p>
