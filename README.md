@@ -2,6 +2,18 @@
 
 **A Multi-Agent AI System for Intelligent Patient Triage, Medical History Collection, and Doctor Matching**
 
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat&logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-teal.svg?style=flat&logo=fastapi)
+![LangChain](https://img.shields.io/badge/LangChain-latest-brightgreen.svg?style=flat&logo=langchain)
+![LangGraph](https://img.shields.io/badge/LangGraph-latest-8A2BE2.svg?style=flat&logo=langchain)
+![Google Gemini](https://img.shields.io/badge/Gemini-2.5_Flash-4285F4.svg?style=flat&logo=google)
+![Google Cloud](https://img.shields.io/badge/Google_Cloud_Translate-4285F4.svg?style=flat&logo=google-cloud)
+![Streamlit](https://img.shields.io/badge/Streamlit-Demo-red.svg?style=flat&logo=streamlit)
+![License](https://img.shields.io/badge/License-Proprietary-yellow.svg)
+![Made with ❤️](https://img.shields.io/badge/Made_with-❤️-red.svg?style=flat)
+![Healthcare](https://img.shields.io/badge/For-African_Healthcare-2ecc71.svg?style=flat)
+![Multi-Language](https://img.shields.io/badge/Multilingual-English%20%7C%20Hausa%20%7C%20Yoruba%20%7C%20Igbo-orange.svg?style=flat)
+
 <p align="center">
   <a href="https://medconnect-ai.streamlit.app/">
     <img src="Demo.png" width="100" />
