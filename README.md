@@ -29,15 +29,6 @@ Designed for integration into medical freelance platforms like MedConnect, this 
 
 ## System Architecture
 
-graph TD
-    A[User Input<br/>(Text/Audio)] --> B(Controller)
-    B --> C(Orchestrator<br/>Receptionist)
-    C -->|General Questions| D(Specialist<br/>Medical Q&A)
-    C -->|Personal Symptoms| E(Clerking<br/>History Collection)
-    D -->|Becomes Personal| E
-    E --> F(SOAP Generation)
-    F --> G(Handoff<br/>Doctor Matching)
-    G --> H[Connect to Doctor<br/>Return doctor ID + Summary]
 
 ![Multi-Agent System Architecture](MedConnect%20Agent%20Architecture.png)
 
