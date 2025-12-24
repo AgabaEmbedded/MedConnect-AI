@@ -10,7 +10,6 @@
 ![Google Cloud](https://img.shields.io/badge/Google_Cloud_Translate-4285F4.svg?style=flat&logo=google-cloud)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Demo-red.svg?style=flat&logo=streamlit)
 ![License](https://img.shields.io/badge/License-Proprietary-yellow.svg)
-![Made with ❤️](https://img.shields.io/badge/Made_with-❤️-red.svg?style=flat)
 ![Healthcare](https://img.shields.io/badge/For-African_Healthcare-2ecc71.svg?style=flat)
 ![Multi-Language](https://img.shields.io/badge/Multilingual-English%20%7C%20Hausa%20%7C%20Yoruba%20%7C%20Igbo-orange.svg?style=flat)
 
