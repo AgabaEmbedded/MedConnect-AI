@@ -19,6 +19,11 @@
   </a>
 </p>
 
+
+## AGENT_ENDPOINT=https://medconnect-api-xrmi.onrender.com/api/agents
+
+
+
 MedConnect AI is a sophisticated, production-ready multi-agent medical assistant built with **LangGraph**, powered by **Gemini Flash** and a **fine-tuned medical LLM** (Mistral-7B). It acts as an intelligent virtual receptionist that guides patients through their medical concerns, collects structured clinical history, generates professional SOAP notes, and matches them with verified doctors based on preferences and clinical needs.
 
 Designed for integration into medical freelance platforms like MedConnect, this system supports **voice and text input**, **multilingual communication** (English, Hausa, Yoruba, Igbo), and **premium-tier enhanced capabilities**.
@@ -196,6 +201,6 @@ This project is proprietary and developed for **MedConnect**. All rights reserve
 
 ---
 
-**Built with ❤️ for accessible healthcare in Africa**  
-By [Agaba Embedded](https://github.com/AgabaEmbedded)
+**Built for accessible healthcare in Africa**  
+By Team Alpha Tech
 ``` 
