@@ -1,0 +1,20 @@
+[Unit]
+Description=SingularityNET Daemon for MedConnect-AI
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/aj/medconnect_service
+ExecStart=/usr/local/bin/snetd --config /home/aj/medconnect_service/snetd.medconnect.config.json
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=snetd-medconnect
+
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=multi-user.target

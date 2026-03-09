@@ -1,30 +1,19 @@
+# Minimal deps for gRPC server only (no Streamlit). Use when disk space is tight.
 spitch==1.41.2
-
 fastapi==0.111.0
 uvicorn==0.30.6
-
 python-dotenv==1.0.1
-
 langchain-core==1.0.2
 langchain-google-genai==3.0.0
-
 google-ai-generativelanguage==0.9.0
 google-api-core>=2.28.1
 google-auth==2.33.0
-# 1.63.x requires protobuf<5; we need protobuf>=5.26 for gRPC stubs. Use >=1.66.
 googleapis-common-protos>=1.66.0
 google-cloud-core==2.5.0
 google-cloud-translate==3.23.0
 openai==2.7.1
-
 langgraph==0.6.11
-
 pydantic==2.9.2
-
-streamlit==1.52.2
-
-# gRPC (for SingularityNET daemon)
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
-# Generated stubs need runtime_version (protobuf 5.26+); google-* want <7
 protobuf>=5.26,<7.0.0

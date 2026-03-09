@@ -1,0 +1,15 @@
+{
+  "name": "medconnect-ai-ui",
+  "version": "1.0.0",
+  "description": "MedConnect-AI gRPC service and AI UI stubs for Constructor",
+  "scripts": {
+    "generate-stubs": "node scripts/generate_stubs.js",
+    "generate-stubs:shell": "bash scripts/generate_stubs.sh"
+  },
+  "devDependencies": {
+    "google-protobuf": "^3.21.2",
+    "grpc-web": "^1.4.2",
+    "protoc-gen-js": "^3.21.4-4",
+    "ts-protoc-gen": "^0.15.0"
+  }
+}

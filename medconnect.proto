@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package medconnect;
+
+// MedConnect AI – multi-agent medical assistant (triage, history, SOAP, doctor matching)
+service MedConnectService {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Conversation(ConversationRequest) returns (ConversationResponse);
+  rpc Reset(ResetRequest) returns (ResetResponse);
+  rpc Translate(TranslateRequest) returns (TranslateResponse);
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string message = 2;
+}
+
+message ConversationRequest {
+  string message = 1;
+  string audio = 2;       // base64-encoded audio (optional)
+  bool premium = 3;
+  string language = 4;    // english, hausa, yoruba, igbo
+}
+
+message ConversationResponse {
+  string message = 1;
+  string audio = 2;           // base64 (if input was audio)
+  string doctor_id = 3;       // set on final handoff
+  string medical_summary = 4; // SOAP note when flow completes
+}
+
+message ResetRequest {}
+
+message ResetResponse {
+  string status = 1;
+}
+
+message TranslateRequest {
+  string message = 1;
+  string source_language = 2;   // e.g. "english", "hausa"
+  string target_language = 3;    // e.g. "english", "yoruba" (default "english" if empty)
+}
+
+message TranslateResponse {
+  string message = 1;            // translated text
+}

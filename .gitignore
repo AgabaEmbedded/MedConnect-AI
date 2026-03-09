@@ -6,6 +6,22 @@ request_model.py
 try.ipynb
 try.py
 .env
+snetd.medconnect.config.json
+# Google Cloud service account key (never commit)
+medconnect-secret*.json
+medconnect-secrete.json
 sample.wav
 translatev2.py
 translatev3.py
+
+# Docs: keep doc/ and other .md local; allow READMEs and instructor handoff (like ckd)
+doc/
+*.md
+!README.md
+!ai_ui/README.md
+!INSTRUCTOR_HANDOFF.md
+
+# Dependencies and env (do not push)
+.venv/
+node_modules/
+__pycache__/

@@ -188,11 +188,12 @@ class ClientManager:
 
     
     def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
-        """Translate text between languages"""
+        """Translate text between languages. Uses ISO 639-1 codes: english->en, yoruba->yo, hausa->ha, igbo->ig."""
         if not self.translate_client:
             logger.warning("Translation client not available, returning original text")
             return text
-        
+        source_lang = (source_lang or "english").lower().strip()
+        target_lang = (target_lang or "english").lower().strip()
         try:
             result = self.translate_client.translate_text(
                 parent=self.parent,
@@ -243,7 +244,11 @@ class ClientManager:
 
 # Global client manager
 client_manager = ClientManager()
-spitch_client = Spitch()
+try:
+    spitch_client = Spitch()
+except Exception as e:
+    logger.error(f"Failed to initialize spitch client: {e}")
+    spitch_client = None  # Server can still run; audio input/output will be skipped
 
 # ============================================================================
 # LLM INITIALIZATION
@@ -462,8 +467,8 @@ def orchestrator_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentSt
     """
     language = state.get("language", "english")
     
-    system_prompt = f"""You are a professional medical receptionist assistant communicating in {language}.
-    you work for MedConnect a company that connects patients to doctor (like a medical freelance platform).
+    system_prompt = f"""You are a professional medical receptionist assistant. You MUST reply to the patient ONLY in {language}. Every message you send must be in {language} (do not use English unless the language is english).
+    You work for MedConnect a company that connects patients to doctors (like a medical freelance platform).
 
 CORE RESPONSIBILITIES:
 • Warmly greet patients and make them feel comfortable
@@ -515,8 +520,11 @@ Remember: Questions about medical topics = specialist | Personal health complain
                 "awaiting_user_input": False
             }
 
+    reply_text = client_manager.extract_text(response.content)
+    if language != "english":
+        reply_text = client_manager.translate_text(reply_text, "english", language)
     return {
-        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
+        "messages": [AIMessage(content=reply_text)],
         "awaiting_user_input": True
     }
 
@@ -560,7 +568,7 @@ GUIDELINES:
     if state["premium"] or not medical_response:
         if state["premium"]:
 
-            system_prompt = f"""You are an expert medical specialist communicating in {language}.
+            system_prompt = f"""You are an expert medical specialist. You MUST reply to the patient ONLY in {language}. Every message must be in {language} (do not use English unless the language is english).
 
             CORE RESPONSIBILITIES:
             • Answer medical questions with accurate, evidence-based information
@@ -586,7 +594,7 @@ GUIDELINES:
 
             Remember: Answer questions, don't diagnose. Personal symptoms require clerking."""
         else:
-            system_prompt = f"""You are an expert medical specialist communicating in {language}.
+            system_prompt = f"""You are an expert medical specialist. You MUST reply to the patient ONLY in {language}. Every message must be in {language} (do not use English unless the language is english).
 
             CORE RESPONSIBILITIES:
             • Answer medical questions with accurate, evidence-based information
@@ -632,7 +640,7 @@ def clerking_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
     """
     language = state.get("language", "english")
     
-    system_prompt = f"""You are a medical history collection specialist communicating in {language}.
+    system_prompt = f"""You are a medical history collection specialist. You MUST reply to the patient ONLY in {language}. Every message must be in {language} (do not use English unless the language is english).
 
 CORE RESPONSIBILITY:
 Systematically collect comprehensive medical history following standard medical clerking structure.
@@ -706,8 +714,11 @@ IMPORTANT:
             "awaiting_user_input": False
         }
     
+    reply_text = client_manager.extract_text(response.content)
+    if language != "english":
+        reply_text = client_manager.translate_text(reply_text, "english", language)
     return {
-        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
+        "messages": [AIMessage(content=reply_text)],
         "clerking_convo": state.get("clerking_convo", "") + clerking_addition,
         "awaiting_user_input": True
     }
@@ -816,7 +827,7 @@ def handoff_node(state: AgentState, llm: ChatGoogleGenerativeAI) -> AgentState:
             }
     
     # Continue doctor matching conversation
-    system_prompt = f"""You are a patient-doctor matching coordinator communicating in {language}.
+    system_prompt = f"""You are a patient-doctor matching coordinator. You MUST reply to the patient ONLY in {language}. Every message must be in {language} (do not use English unless the language is english).
 
 CORE RESPONSIBILITIES:
 • Help patients find the right doctor for their medical needs
@@ -922,8 +933,11 @@ Remember: Your goal is finding the best match for the patient's needs and prefer
                 "awaiting_user_input": True
             }
     
+    reply_text = client_manager.extract_text(response.content)
+    if language != "english":
+        reply_text = client_manager.translate_text(reply_text, "english", language)
     return {
-        "messages": [AIMessage(content=client_manager.extract_text(response.content))],
+        "messages": [AIMessage(content=reply_text)],
         "awaiting_user_input": True
     }
 
@@ -1064,11 +1078,8 @@ def run_conversation_turn(
     
 
     logger.info(f"ACTIVE LANGUAGE: {state['language']}")
-    if user_input.audio != "":
+    if user_input.audio != "" and spitch_client is not None:
         audio_bytes = base64.b64decode(user_input.audio)
-        #with open(audio_path, "wb") as f:
-        #    f.write(audio_bytes)
-        
         response = spitch_client.speech.transcribe(
             language=state["language"][:2],
             content=audio_bytes,
@@ -1076,11 +1087,12 @@ def run_conversation_turn(
             timestamp="sentence"
         )
         state["messages"].append(HumanMessage(content=response.text))
-        
         logger.info(f"STT Response: {response.text}")
-    else:     
-        # Update state with user input
-        state["messages"].append(HumanMessage(content=user_input.message))
+    else:
+        # Text input, or audio but Spitch not configured
+        if user_input.audio and spitch_client is None:
+            logger.warning("Audio received but Spitch client not available; use message field for text.")
+        state["messages"].append(HumanMessage(content=user_input.message or "(no text)"))
     
     #if user_input.isdoctorlist:
     #    state["doctor_list"] = user_input.doctor_list
@@ -1139,12 +1151,12 @@ async def handle_agent_interaction(user_input: UserMessage):
                 
                 message = last_message.content
 
-                if user_input.audio != "":
+                if user_input.audio != "" and spitch_client is not None:
                     response = spitch_client.speech.generate(
-                    text= message,
-                    language= state["language"][:2],
-                    voice= client_manager.voice_dict[state["language"]],
-                    format="mp3"
+                        text=message,
+                        language=state["language"][:2],
+                        voice=client_manager.voice_dict[state["language"]],
+                        format="mp3"
                     )
                     base64_audio = base64.b64encode(response.read()).decode("utf-8")
                 else:

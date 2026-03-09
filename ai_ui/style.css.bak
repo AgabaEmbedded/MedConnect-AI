@@ -1,0 +1,304 @@
+/* MedConnect AI UI - dark theme for AI UI Constructor */
+:root {
+  --bg-page: #1a1b1e;
+  --bg-card: #25262b;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #c0c4cc;
+  --accent: #6366f1;
+  --text-muted: #8b8f98;
+  --radius: 12px;
+}
+
+.medconnect-container {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 1.25rem;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg-page);
+  color: var(--text) !important;
+  min-height: 100%;
+  border-radius: var(--radius);
+}
+
+.medconnect-container p,
+.medconnect-container span,
+.medconnect-container label,
+.medconnect-container h4 {
+  color: #c8ccd4 !important;
+}
+
+.input-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.input-block h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hint {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.85rem;
+  color: #b8bcc4 !important;
+}
+
+.health-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.health-status {
+  font-size: 0.85rem;
+  color: #b8bcc4 !important;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.row label {
+  font-size: 0.85rem;
+  color: #b8bcc4 !important;
+}
+
+.row input,
+.row select {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-page);
+  color: #c0c4cc !important;
+  font-size: 0.9rem;
+}
+
+.cta-row {
+  margin-top: 1rem;
+}
+
+.output-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-top: 0.75rem;
+}
+
+.output-card p {
+  margin: 0.25rem 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.reply-text {
+  color: #dde0e5 !important;
+}
+
+.summary, .doctor {
+  font-size: 0.85rem !important;
+  color: #b8bcc4 !important;
+}
+
+.error-msg {
+  color: #f87171;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+}
+-bg-page);
+  color: #c0c4cc !important;
+  font-size: 0.9rem;
+}
+
+.cta-row {
+  margin-top: 1rem;
+}
+
+.output-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-top: 0.75rem;
+}
+
+.output-card p {
+  margin: 0.25rem 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.reply-text {
+  color: #dde0e5 !important;
+}
+
+.summary, .doctor {
+  font-size: 0.85rem !important;
+  color: #b8bcc4 !important;
+}
+
+.error-msg {
+  color: #f87171;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 6px;
+}
+atus--ok .health-dot {
+  background: var(--success);
+}
+
+.health-status--error .health-dot {
+  background: var(--error);
+}
+
+.health-status--ok {
+  color: var(--success) !important;
+}
+
+.health-status--error {
+  color: var(--error) !important;
+}
+
+/* Form rows */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.row--gap {
+  gap: 0.75rem;
+}
+
+.row label {
+  font-size: 0.85rem;
+  color: var(--text-muted) !important;
+}
+
+.row input,
+.row select {
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-page);
+  color: var(--text) !important;
+  font-size: 0.9rem;
+}
+
+.row input:focus,
+.row select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.translate-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.cta-row {
+  margin-top: var(--space);
+}
+
+/* Reply as chat bubble */
+.reply-bubble {
+  margin-top: var(--space);
+  padding: var(--space);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  border-left: 3px solid var(--accent);
+  max-width: 90%;
+}
+
+.reply-bubble .reply-text {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #e4e6eb !important;
+}
+
+.reply-bubble .summary,
+.reply-bubble .doctor {
+  font-size: 0.8rem !important;
+  color: var(--text-muted) !important;
+  margin: 0.25rem 0 0 0;
+}
+
+/* Translate result block */
+.translate-result {
+  margin-top: var(--space);
+  padding: var(--space);
+  background: var(--success-soft);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  border-radius: var(--radius);
+}
+
+.translate-result-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--success) !important;
+  margin-bottom: 0.35rem;
+}
+
+.translate-result-text {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: #e4e6eb !important;
+}
+
+/* Legacy output-card (if still used elsewhere) */
+.output-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space);
+  margin-top: 0.75rem;
+}
+
+.output-card p {
+  margin: 0.25rem 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.reply-text {
+  color: #dde0e5 !important;
+}
+
+.summary,
+.doctor {
+  font-size: 0.85rem !important;
+  color: var(--text-muted) !important;
+}
+
+/* Error */
+.error-msg {
+  color: var(--error) !important;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--error-soft);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+}

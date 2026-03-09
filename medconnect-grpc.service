@@ -1,0 +1,18 @@
+[Unit]
+Description=MedConnect-AI gRPC Server
+After=network.target
+
+[Service]
+Type=simple
+User=aj
+WorkingDirectory=/home/aj/medconnect_service
+Environment="PATH=/home/aj/medconnect_service/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/aj/medconnect_service/.venv/bin/python /home/aj/medconnect_service/grpc_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=medconnect-grpc
+
+[Install]
+WantedBy=multi-user.target
